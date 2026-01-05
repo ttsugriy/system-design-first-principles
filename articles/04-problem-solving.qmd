@@ -1,0 +1,480 @@
+---
+title: "A Problem-Solving Framework"
+subtitle: "From Requirements to Design"
+author: "Taras Tsugrii"
+date: today
+bibliography: ../references.bib
+---
+
+# The Need for Process
+
+We now have the building blocks: primitives, trade-off dimensions, and an understanding that there's no universal "best" design. But knowing the pieces doesn't tell you how to assemble them.
+
+What we need is a **process**—a structured approach to system design that helps us:
+
+1. Understand what we're actually trying to build
+2. Explore the space of possible solutions
+3. Make and justify design decisions
+4. Verify that our design meets requirements
+
+For this, we turn to George Polya's classic problem-solving framework from *How to Solve It* [@polya1945solve], adapted for system design.
+
+# Polya's Four Steps
+
+Polya identified four phases in problem-solving:
+
+1. **Understand the problem**
+2. **Devise a plan**
+3. **Carry out the plan**
+4. **Look back**
+
+These steps seem obvious, but their power lies in the discipline they impose. Most design failures happen not because engineers lack technical skill, but because they skip step one—understanding the problem—and jump straight to solutions.
+
+Let's adapt each step for system design.
+
+# Step 1: Understand the Problem
+
+Before you draw a single box or mention a single technology, answer these questions:
+
+## Functional Requirements: What Does the System Do?
+
+- What are the core use cases?
+- What operations must users be able to perform?
+- What data flows through the system?
+- What are the inputs and outputs?
+
+Be specific. "Users can upload files" is vague. "Users can upload files up to 5GB, which are stored durably and can be retrieved by unique ID" is concrete.
+
+## Non-Functional Requirements: How Well Must It Do It?
+
+These are the quality attributes that constrain your design:
+
+| Attribute | Questions to Ask |
+|-----------|------------------|
+| **Performance** | What's the target latency? P50? P99? What throughput must we support? |
+| **Scalability** | How many users? How much data? What's the growth rate? |
+| **Availability** | What uptime is required? 99%? 99.9%? 99.99%? |
+| **Durability** | Can we lose data? How much? What's the cost of data loss? |
+| **Consistency** | Do all users need to see the same data immediately? Can we tolerate staleness? |
+| **Security** | What are the authentication/authorization requirements? Data sensitivity? |
+
+## Constraints: What Can't We Change?
+
+- Budget (money, time, team size)
+- Existing systems we must integrate with
+- Regulatory requirements (GDPR, HIPAA, etc.)
+- Technology mandates or restrictions
+
+## Clarifying Questions
+
+Polya's first step includes "Do you understand all the words?" For system design, this translates to:
+
+- What does "real-time" mean? Sub-second? Sub-minute?
+- What does "high availability" mean? Two nines? Five nines?
+- What does "scalable" mean? 10x? 1000x?
+
+Never assume. Ask. Quantify.
+
+## The Numbers: Back-of-Envelope Estimation
+
+Before designing, estimate the scale:
+
+**Daily Active Users (DAU)**: How many users per day?
+
+**Queries Per Second (QPS)**:
+$$QPS = \frac{DAU \times \text{actions per user per day}}{86400}$$
+
+**Storage**: How much data per user? Total storage needed?
+
+**Bandwidth**: Requests × average payload size
+
+### Reference Numbers
+
+Keep these latency numbers in mind (originally compiled by Jeff Dean):
+
+| Operation | Latency |
+|-----------|---------|
+| L1 cache reference | 0.5 ns |
+| L2 cache reference | 7 ns |
+| Main memory reference | 100 ns |
+| SSD random read (4KB) | 150 µs |
+| Read 1 MB from memory | 250 µs |
+| Round trip within datacenter | 500 µs |
+| Read 1 MB from SSD | 1 ms |
+| Disk seek | 10 ms |
+| Read 1 MB from disk | 20 ms |
+| Send packet CA→Netherlands→CA | 150 ms |
+
+And these capacity numbers:
+
+| Resource | Approximate Value |
+|----------|-------------------|
+| Seconds per day | 86,400 (~10^5) |
+| Requests per day at 1 QPS | ~100,000 |
+| Requests per day at 1000 QPS | ~100 million |
+| 1 MB per user × 1M users | 1 TB |
+| 1 GB per user × 1M users | 1 PB |
+
+### Example Estimation
+
+*"Design a URL shortener."*
+
+Let's estimate:
+- 100 million new URLs per month
+- 10:1 read-to-write ratio
+- URLs stored for 5 years
+
+**Write QPS**: 100M / (30 × 86400) ≈ 40 writes/second
+
+**Read QPS**: 40 × 10 = 400 reads/second
+
+**Storage**: 100M × 12 months × 5 years = 6 billion URLs
+- Each URL: ~100 bytes (short code + original URL + metadata)
+- Total: 6B × 100 bytes = 600 GB
+
+This is well within single-machine capacity for storage, but we'd want replication for durability and multiple machines for availability.
+
+# Step 2: Devise a Plan
+
+Now you understand the problem. How do you explore solutions?
+
+## Identify the Core Challenge
+
+Every system has a central tension. Find it:
+
+- Is this read-heavy or write-heavy?
+- Is latency or throughput more critical?
+- Is consistency or availability more important?
+- What's the hardest part of the problem?
+
+For a URL shortener: The core challenge is generating unique short codes at scale and looking them up quickly. This is fundamentally a key-value problem.
+
+## Select Primitives
+
+Given the core challenge, which primitives apply?
+
+| Challenge | Relevant Primitives |
+|-----------|---------------------|
+| Fast key-value lookups | Hash index, B-tree, LSM-tree |
+| High write throughput | Append-only log, LSM-tree |
+| Durability | WAL, replication |
+| Horizontal scaling | Partitioning, consistent hashing |
+| Caching hot data | LRU cache, read-through cache |
+
+## Apply Heuristics
+
+Polya listed heuristics like "solve a simpler problem" and "work backwards." Here are system design equivalents:
+
+### Start Simple, Add Complexity
+Begin with the simplest design that could work. A single database. One server. No caching. Then identify why that won't work and add complexity only where needed.
+
+### Work Backwards from Requirements
+If you need 99.99% availability, you need redundancy. If you need sub-10ms latency, you need caching. Let requirements drive decisions.
+
+### Find Analogies
+Have you solved a similar problem? Is this like a message queue? A cache? A database? Leverage patterns you know.
+
+### Consider the Extremes
+What happens at 10x scale? 100x? What happens if traffic spikes 10x in a minute? Stress-test your design mentally.
+
+### Identify the Bottleneck
+Where will this system fail first? CPU? Memory? Disk I/O? Network? Design for the bottleneck.
+
+## Sketch the High-Level Design
+
+Now draw the boxes:
+
+1. **Entry points**: How do requests enter? (Load balancer, API gateway)
+2. **Application logic**: Where does processing happen?
+3. **Data storage**: Where does state live?
+4. **Caching layers**: Where do we speed things up?
+5. **Background processing**: What happens async?
+
+For our URL shortener:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        High-Level Design                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Users ──► Load Balancer ──► API Servers ──► Cache (Redis)    │
+│                                    │              │             │
+│                                    │              ▼             │
+│                                    └────────► Database          │
+│                                              (Key-Value)        │
+│                                                                 │
+│   Background: Analytics collection, expired URL cleanup         │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Define APIs
+
+What operations does the system expose?
+
+```
+POST /shorten
+  Request:  { "url": "https://example.com/very/long/url" }
+  Response: { "short_url": "https://short.ly/abc123" }
+
+GET /{short_code}
+  Response: 301 Redirect to original URL
+```
+
+## Choose Data Model
+
+What's the schema? For URL shortener:
+
+```
+Table: urls
+┌────────────┬───────────────────────────┬─────────────┬────────────┐
+│ short_code │ original_url              │ created_at  │ expires_at │
+├────────────┼───────────────────────────┼─────────────┼────────────┤
+│ abc123     │ https://example.com/...   │ 2024-01-15  │ 2029-01-15 │
+└────────────┴───────────────────────────┴─────────────┴────────────┘
+```
+
+Primary key: `short_code` (enables O(1) lookup with hash index)
+
+# Step 3: Carry Out the Plan
+
+Now dive into details. For each component, ask:
+
+## Technology Selection
+
+For each primitive, what concrete technology?
+
+| Primitive | Options | Selection Criteria |
+|-----------|---------|-------------------|
+| Key-value store | Redis, DynamoDB, Cassandra | Scale, consistency needs, operational complexity |
+| Cache | Redis, Memcached | Data structures needed, persistence requirements |
+| Message queue | Kafka, SQS, RabbitMQ | Throughput, ordering, durability |
+| Load balancer | Nginx, HAProxy, cloud LB | Protocol support, features needed |
+
+## Address Non-Functional Requirements
+
+For each NFR, how does the design satisfy it?
+
+**Availability**: Multiple API servers behind load balancer. Database replication. Failover mechanisms.
+
+**Durability**: Database with replication. Backups. Consider multi-region.
+
+**Scalability**: Stateless API servers (horizontal scaling). Partitioned database if needed.
+
+**Performance**: Cache hot URLs in Redis. Use hash-based lookup for O(1) reads.
+
+## Handle Edge Cases
+
+What could go wrong?
+
+- What if two users try to create the same short code simultaneously?
+- What if the database is temporarily unavailable?
+- What if a short code receives viral traffic?
+- What if a malicious user tries to exhaust the keyspace?
+
+Design for these:
+- Use atomic operations or locks for code generation
+- Implement circuit breakers and graceful degradation
+- Cache heavily-accessed URLs; consider rate limiting
+- Monitor keyspace usage; extend code length if needed
+
+## Document Decisions
+
+Use Architecture Decision Records (ADRs) to capture:
+
+- **Context**: What situation prompted this decision?
+- **Decision**: What did we choose?
+- **Consequences**: What are the trade-offs?
+- **Alternatives**: What else did we consider?
+
+Example ADR:
+
+> **ADR-001: Use Redis for caching**
+>
+> **Context**: We need to cache hot URLs to reduce database load and improve latency.
+>
+> **Decision**: Use Redis as a read-through cache with 1-hour TTL.
+>
+> **Consequences**:
+> - (+) Sub-millisecond cache hits
+> - (+) Reduces DB read load by estimated 90%
+> - (-) Additional infrastructure to operate
+> - (-) Potential cache inconsistency on URL updates
+>
+> **Alternatives**: Memcached (simpler but fewer data structures), database query cache (less control over eviction).
+
+# Step 4: Look Back
+
+The design isn't done until you verify it.
+
+## Validate Against Requirements
+
+Walk through each requirement:
+
+| Requirement | How Design Satisfies It |
+|-------------|------------------------|
+| 400 QPS reads | Cache hit rate > 90%, 3 API servers handle remainder |
+| 99.9% availability | 3 API servers, database replica, Redis cluster |
+| < 50ms P99 latency | Redis cache: ~1ms, DB fallback: ~20ms |
+| 5-year durability | Database replication, daily backups, multi-AZ |
+
+## Trace Request Paths
+
+Walk through the full path of each operation:
+
+**Create short URL**:
+1. Request hits load balancer
+2. Routed to API server
+3. Generate unique short code (check DB for collision)
+4. Write to database
+5. Optionally warm cache
+6. Return short URL
+
+**Redirect**:
+1. Request hits load balancer
+2. Routed to API server
+3. Check Redis cache
+4. Cache hit: return redirect
+5. Cache miss: query database, populate cache, return redirect
+
+## Identify Weaknesses
+
+No design is perfect. Acknowledge limitations:
+
+- "This design is optimized for read-heavy workloads. Write-heavy would need different primitives."
+- "Single-region deployment means higher latency for international users."
+- "Cache invalidation on URL updates is eventually consistent."
+
+## Consider Evolution
+
+How would this design evolve?
+
+- **10x scale**: Add more API servers, scale Redis cluster, consider database sharding
+- **Geographic expansion**: Multi-region replication, global load balancing
+- **New features**: Analytics (add event streaming), custom short codes (add reservation system)
+
+# The Framework in Practice
+
+Let's see the complete framework applied to a different problem.
+
+## Problem: Design a Rate Limiter
+
+### Step 1: Understand
+
+**Functional**: Limit API requests to N per time window per client. Return 429 when exceeded.
+
+**Non-Functional**:
+- Latency: < 1ms overhead
+- Availability: Limiter failure should fail open (allow requests)
+- Accuracy: Approximate is acceptable; don't over-limit
+
+**Constraints**:
+- Must work across multiple API servers
+- 100K+ unique clients
+- Multiple rate limit tiers
+
+**Estimation**:
+- 100K clients × 100 requests/min = 10M requests/min = 167K QPS
+- Counter storage: 100K clients × 8 bytes = 800 KB (fits in memory)
+
+### Step 2: Devise Plan
+
+**Core challenge**: Distributed counter that's fast and consistent enough.
+
+**Primitives**:
+- In-memory counter (fast)
+- Distributed cache (shared state)
+- Sliding window or token bucket algorithm
+
+**High-level design**:
+```
+Request ──► Rate Limiter Middleware ──► Redis (counters) ──► API
+                    │
+                    └──► If over limit: 429 response
+```
+
+**Algorithm**: Sliding window log or token bucket. Token bucket is simpler and handles bursts well.
+
+### Step 3: Execute
+
+**Technology**: Redis with atomic INCR and EXPIRE operations.
+
+**Implementation sketch**:
+```
+key = "rate_limit:{client_id}:{window}"
+current = INCR(key)
+if current == 1:
+    EXPIRE(key, window_size)
+if current > limit:
+    return 429
+```
+
+**Edge cases**:
+- Redis unavailable: Fail open (allow request, log warning)
+- Clock skew across servers: Use Redis server time, not local
+- Distributed race conditions: INCR is atomic; good enough for rate limiting
+
+### Step 4: Look Back
+
+**Validation**:
+- 1ms latency: Redis INCR is sub-ms ✓
+- Fail open: Implemented ✓
+- Approximate accuracy: Sliding window can over-count by up to 2x at window boundaries; acceptable ✓
+
+**Weaknesses**:
+- Single Redis is SPOF; need Redis cluster for production
+- Doesn't handle distributed clients perfectly (client could hit different rate limit windows)
+
+**Evolution**:
+- Add local rate limiting with periodic sync to reduce Redis calls
+- Implement hierarchical limits (per-user, per-IP, global)
+
+# Principles for Good Design
+
+Throughout this process, keep these principles in mind:
+
+## Make Trade-offs Explicit
+
+Never pretend you're getting something for free. State what you're optimizing for and what you're sacrificing.
+
+## Design for Failure
+
+Everything fails: networks, disks, servers, regions. Design for graceful degradation, not perfection.
+
+## Prefer Simple Solutions
+
+The best design is the simplest one that meets requirements. Complexity is a cost; only pay it when necessary.
+
+## Defer Decisions When Possible
+
+Don't over-design. Build what you need now; leave room for evolution. You'll know more later.
+
+## Document Why, Not Just What
+
+The architecture diagram shows what you built. The ADRs explain why. Future you (and your team) will thank you.
+
+# Conclusion: Part I Complete
+
+We've now covered the foundations:
+
+1. **The Design Space Problem**: There's no "best"—only trade-offs
+2. **Primitives**: The building blocks of all systems
+3. **Trade-off Dimensions**: The axes along which choices have costs
+4. **A Problem-Solving Framework**: Polya's method adapted for system design
+
+With these foundations, you can approach any system design problem systematically:
+
+- Understand before solving
+- Know your primitives
+- Make trade-offs explicit
+- Verify against requirements
+
+In Part II, we'll dive deeper into specific primitives. In Part III, we'll compose them into complete case studies. And in Part IV, we'll explore how AI can help navigate the design space.
+
+But the foundations are now in place. The rest is application.
+
+---
+
+*Part I: Foundations — Complete*
+
+*Next: Part II: Primitives Deep-Dives*
