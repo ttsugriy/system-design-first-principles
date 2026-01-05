@@ -17,12 +17,12 @@ book:
         - articles/02-primitives.qmd
         - articles/03-tradeoffs.qmd
         - articles/04-problem-solving.qmd
-    # - part: "Part II: Primitives Deep-Dives"
-    #   chapters:
-    #     - articles/05-data-organization.qmd
-    #     - articles/06-access-structures.qmd
-    #     - articles/07-consistency-coordination.qmd
-    #     - articles/08-caching-tiering.qmd
+    - part: "Part II: Primitives Deep-Dives"
+      chapters:
+        - articles/05-lsm-trees.qmd
+        # - articles/06-b-trees.qmd
+        # - articles/07-consensus.qmd
+        # - articles/08-caching.qmd
     # - part: "Part III: Composition"
     #   chapters:
     #     - articles/09-combining-primitives.qmd

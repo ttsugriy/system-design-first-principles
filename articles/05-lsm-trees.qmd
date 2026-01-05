@@ -1,0 +1,425 @@
+---
+title: "LSM-Trees"
+subtitle: "The Write-Optimized Workhorse"
+author: "Taras Tsugrii"
+date: today
+bibliography: ../references.bib
+---
+
+# Introduction: The Problem LSM-Trees Solve
+
+Imagine you're building a system that ingests millions of writes per second—logs from distributed services, time-series metrics, user events. Traditional B-trees struggle here: every write requires finding the right page, potentially splitting nodes, and performing random I/O to update in-place.
+
+What if instead of updating in place, you just wrote everything sequentially? Accept new data wherever you are on disk, sort it later. This is the core insight behind **Log-Structured Merge Trees** (LSM-trees).
+
+LSM-trees power some of the most write-intensive systems in production:
+- **RocksDB** / **LevelDB** — embedded storage engines
+- **Apache Cassandra** / **ScyllaDB** — distributed databases
+- **Apache HBase** — column-family stores
+- **Google Bigtable** — the system that inspired them all
+
+Understanding LSM-trees deeply means understanding the architecture behind modern data infrastructure.
+
+# The Core Idea
+
+An LSM-tree is a **write-optimized** data structure that trades read amplification for write throughput. The key insight:
+
+> Convert many small random writes into a few large sequential writes.
+
+How? By accepting writes in memory, batching them, and flushing sorted runs to disk. Over time, merge these runs in the background to maintain read performance.
+
+# Architecture: The Components
+
+Let's decompose an LSM-tree into its primitives.
+
+## 1. Memtable: The In-Memory Buffer
+
+All writes first go to an in-memory structure called the **memtable**.
+
+**Purpose**: Absorb writes at memory speed, avoiding disk entirely for fresh data.
+
+**Implementation**: Typically a skip list or hash skip list. Why skip lists?
+- O(log n) reads and writes
+- Concurrent insertion without locking
+- Naturally sorted for efficient flush
+
+RocksDB offers four memtable implementations:
+
+| Type | Use Case | Trade-offs |
+|------|----------|-----------|
+| **SkipList** (default) | General purpose | Balanced read/write, supports range scans |
+| **HashSkipList** | Prefix lookups | Fast for known prefixes, expensive full scans |
+| **HashLinkList** | Prefix lookups, lower memory | Cheaper than hash skip list, same scan cost |
+| **Vector** | High random writes | Minimal overhead, linear search |
+
+**When it flushes**: When the memtable reaches a size threshold (typ. 4-64 MB), it becomes immutable and a new memtable takes over. The immutable memtable is flushed to disk as an SSTable.
+
+## 2. Write-Ahead Log (WAL): Durability
+
+Before a write enters the memtable, it's appended to the **WAL** (Write-Ahead Log).
+
+**Purpose**: Crash recovery. If the system dies before the memtable flushes, replay the WAL to reconstruct state.
+
+**Mechanism**:
+1. Append operation to WAL (sequential write to disk)
+2. Insert into memtable (in-memory)
+3. Return success to client
+
+Once the memtable is safely flushed to an SSTable, the corresponding WAL segment is deleted.
+
+**Trade-off**: Every write incurs WAL overhead (typically small, sequential I/O). But you can tune `sync` behavior:
+- **Synchronous** (`sync=true`): Wait for fsync. Durable but slow (~1-10ms per write).
+- **Asynchronous** (`sync=false`): Return immediately. Fast but risks losing recent writes on crash.
+
+Group commit batches writes to amortize fsync cost.
+
+## 3. SSTables: Immutable Sorted Files
+
+When a memtable flushes, it becomes an **SSTable** (Sorted String Table)—an immutable, sorted file on disk.
+
+**Structure**:
+```
+┌────────────────────────────────────────────────────────┐
+│                      SSTable File                      │
+├────────────────────────────────────────────────────────┤
+│  ┌──────────────────────────────────────────────────┐  │
+│  │              Data Blocks (~4-32 KB)               │  │
+│  │  ┌─────────┬─────────┬─────────┬─────────────┐   │  │
+│  │  │ k1: v1  │ k5: v5  │ k9: v9  │ ...         │   │  │
+│  │  └─────────┴─────────┴─────────┴─────────────┘   │  │
+│  └──────────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │         Index Block (sparse index)                │  │
+│  │    k1 → offset 0,  k1000 → offset 4096 ...       │  │
+│  └──────────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │         Bloom Filter (probabilistic)              │  │
+│  │    "Does key exist in this file?" → Yes/Maybe    │  │
+│  └──────────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │              Footer (metadata)                    │  │
+│  │    Index offset, filter offset, magic number     │  │
+│  └──────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────┘
+```
+
+**Key properties**:
+- **Sorted**: Enables binary search and efficient merges
+- **Immutable**: Once written, never modified. Updates create new SSTables.
+- **Compressed**: Blocks are typically compressed (Snappy, LZ4, Zstd)
+
+**Reading from an SSTable**:
+1. Check bloom filter: "Does key K exist?" → "No" → Skip file. "Maybe" → Continue.
+2. Binary search index to find relevant data block
+3. Read and decompress block
+4. Binary search within block for key
+
+## 4. Bloom Filters: Avoiding Disk Reads
+
+A bloom filter is a probabilistic data structure: it answers "Is key K in this file?" with:
+- **"No"** — guaranteed correct
+- **"Maybe"** — K might be there; check the file
+
+**Why it matters**: In an LSM-tree with dozens of SSTables per level, checking every file for a key would be prohibitively expensive. Bloom filters eliminate most unnecessary disk reads.
+
+**Tuning bits per key** (RocksDB):
+
+| Bits/Key | False Positive Rate | Effectiveness |
+|----------|---------------------|---------------|
+| 1.5 | 50% | 50% effective |
+| 2.9 | 25% | 75% effective |
+| 4.9 | 10% | 90% effective |
+| 9.9 | 1% | 99% effective |
+| 15.5 | 0.1% | 99.9% effective |
+
+Default: **10 bits/key** ≈ 1% false positive rate.
+
+**Trade-off**: More bits → lower false positive rate → less unnecessary I/O, but more memory.
+
+For a 1 TB database with 1 billion keys:
+- 10 bits/key = 10 billion bits = 1.25 GB bloom filter memory
+- 20 bits/key = 2.5 GB bloom filter memory
+
+## 5. Levels: Organizing SSTables
+
+SSTables aren't all equal. They're organized into **levels**, where each level is larger than the previous by a factor (typically 10×).
+
+**Level structure**:
+```
+Level 0: [SST] [SST] [SST] [SST]        ← Just-flushed memtables, overlapping keys
+         ↓ compaction
+Level 1: [────SST────] [────SST────]     ← Non-overlapping, size ~10× L0
+         ↓ compaction
+Level 2: [──────────────SST──────────────] [──────────────SST──────────────]
+         ↓ compaction                     ← Size ~10× L1
+Level 3: ...
+```
+
+**Key properties**:
+- **Level 0**: SSTables may have overlapping key ranges (each came from a different memtable flush)
+- **Level 1+**: Non-overlapping key ranges within a level (result of compaction)
+
+**Size ratios**: Commonly T = 10 (each level is 10× the previous). This creates:
+- Fewer levels (log₁₀ N levels for N total data)
+- Bounded write amplification
+
+## 6. Compaction: Merging and Cleanup
+
+Over time, you accumulate many SSTables across levels. **Compaction** merges them to:
+- Remove obsolete data (deleted or overwritten keys)
+- Reduce the number of files to check on reads
+- Maintain non-overlapping key ranges at Level 1+
+
+### Leveled Compaction (RocksDB default)
+
+**How it works**:
+1. When Level L exceeds its size target, pick SSTables from L that overlap with keys in L+1
+2. Merge them: sort all keys, keep only the latest version
+3. Write new SSTables to L+1
+4. Delete old SSTables from L and L+1
+
+**Trade-offs**:
+- **Low space amplification** (~1.1×): Only one version of each key exists (plus in-compaction files)
+- **High write amplification**: Data is rewritten multiple times as it moves down levels
+
+**Write amplification formula** (approximate):
+$$WA = T \times L$$
+
+Where T = size ratio between levels (typ. 10), L = number of levels.
+
+For a 1 TB database with 10× ratio and 4 levels: WA ≈ 40×.
+
+Each byte written by the application is written to disk ~40 times total (WAL, memtable flush, compaction at each level).
+
+### Universal (Tiered) Compaction
+
+**How it works**:
+- Each level has N sorted runs
+- When a level fills, compact all runs from level L into runs at level L+1
+- **No rewriting at the destination level**
+
+**Trade-offs**:
+- **Lower write amplification**: Per-level WA = 1 (no rewrites)
+- **Higher space amplification** (~2×): Multiple versions of keys coexist during major compaction
+- **Temporary space spikes**: Compacting all of level L requires L × 2 space during the merge
+
+**When to use**: Write-heavy workloads on large storage. Not ideal for databases > 100 GB due to space overhead.
+
+### FIFO Compaction
+
+**How it works**:
+- Files have timestamps
+- When storage limit is reached, delete oldest files
+- No merging, just deletion
+
+**When to use**: Cache-like data or time-series with TTL, where old data is simply discarded.
+
+# Read Path: Finding a Key
+
+Let's trace a point lookup: `GET("user:12345")`
+
+## Step-by-step:
+
+1. **Check memtable** (in-memory)
+   - If found → return immediately
+   - Else → continue
+
+2. **Check immutable memtable** (if mid-flush)
+   - If found → return
+   - Else → continue
+
+3. **Level 0 SSTables** (may overlap)
+   - For each L0 SSTable:
+     - Check bloom filter → "Maybe" → Read index → Read data block → Binary search
+     - Or → "No" → Skip
+   - If found → return
+   - Else → continue
+
+4. **Level 1+ SSTables** (non-overlapping)
+   - Find the one SSTable whose key range contains the target
+   - Check bloom filter → Maybe/No
+   - If Maybe → Read index → Read data block → Binary search
+   - Else → Skip to next level
+
+5. **Not found** → Return null
+
+## Read Amplification
+
+In the worst case (key doesn't exist):
+- Check all L0 SSTables: suppose 4 files × 1 block read = 4 blocks
+- Check 1 SSTable per level at L1, L2, L3: 3 blocks
+- **Total**: 7 block reads
+
+With good bloom filters, many of these become cache hits or filter rejections. But read amplification is real.
+
+**For range queries**, the problem is worse: you must merge-iterate across all levels, reading from multiple SSTables simultaneously.
+
+# Write Path: Inserting a Key
+
+`PUT("user:12345", "data")`
+
+## Step-by-step:
+
+1. **Append to WAL** (sequential disk write, ~10-100µs with async mode)
+
+2. **Insert into memtable** (in-memory, skip list insert, ~1µs)
+
+3. **Return success to client**
+
+4. **Background: Memtable full?**
+   - If memtable size > threshold (e.g., 64 MB):
+     - Make memtable immutable
+     - Spawn new memtable
+     - Flush immutable memtable to SSTable (Level 0)
+     - Delete corresponding WAL segment
+
+5. **Background: Level 0 full?**
+   - If L0 has too many SSTables (e.g., 4):
+     - Trigger compaction: L0 → L1
+
+6. **Background: Level 1 full?**
+   - If L1 size > target (e.g., 10 MB):
+     - Trigger compaction: L1 → L2
+
+And so on, cascading down levels.
+
+# Write Amplification: The Cost
+
+Write amplification (WA) is the ratio of bytes physically written to disk vs. bytes logically written by the application.
+
+**Sources of WA in LSM-trees**:
+
+1. **WAL write**: 1× (write once to log)
+2. **Memtable flush**: 1× (write to L0 SSTable)
+3. **Compaction**: T × (L - 1) where T = level size ratio, L = number of levels
+
+**Example calculation**:
+- Database: 1 TB
+- Level ratio T = 10
+- Levels: L0 (10 MB), L1 (100 MB), L2 (1 GB), L3 (10 GB), L4 (100 GB), L5 (1 TB) → 6 levels
+- WA = 1 (WAL) + 1 (flush) + 10 × 5 (compaction) = **52×**
+
+**Real-world data** (from research comparing RocksDB to WiredTiger B-tree):
+- RocksDB (LSM): 38×
+- WiredTiger B-tree (8 KB pages): 268×
+- WiredTiger B-tree (16 KB pages): 530×
+
+LSM-trees have high write amplification—but still dramatically lower than B-trees for write-heavy workloads.
+
+# Space Amplification: How Much Extra Storage?
+
+Space amplification is the ratio of physical storage used to logical data size.
+
+**Sources**:
+- **Leveled compaction**: ~1.1× (only during active compaction are old/new versions both present)
+- **Universal compaction**: ~2× (multiple versions coexist longer)
+- **Compression**: Can reduce to 0.3-0.5× depending on data and algorithm
+
+**Tuning knobs**:
+- More aggressive compaction → lower space amplification, higher write amplification
+- Lazy compaction → higher space amplification, lower write amplification
+
+# Tuning Parameters: Making Choices
+
+RocksDB exposes hundreds of tuning knobs. Here are the critical ones:
+
+## Write Buffer
+
+`write_buffer_size = 64 MB` (default)
+
+Larger memtable → fewer flushes → lower write amp, but higher recovery time and memory usage.
+
+## Level Sizes
+
+`max_bytes_for_level_base = 256 MB`
+
+Level 1 target size. Subsequent levels are `base × T^(L-1)` where T = level multiplier (default 10).
+
+**Rule of thumb**: Set L1 ≈ 10 × memtable size to balance write amp.
+
+## Bloom Filter
+
+`filter_policy = NewBloomFilterPolicy(10)` (10 bits/key)
+
+Lower bits/key → more false positives → more unnecessary reads. Higher → more memory.
+
+## Compaction Threads
+
+`max_background_compactions = 4`
+
+More threads → faster compaction → less backlog, but more CPU/IO contention.
+
+## Compression
+
+`compression_per_level = [none, none, snappy, snappy, zstd]`
+
+Compress lower (hotter) levels less aggressively for faster reads. Compress higher (colder) levels more for space savings.
+
+# When to Use LSM-Trees
+
+LSM-trees excel when:
+
+✓ **Write-heavy workloads** (logs, metrics, events, time-series)
+✓ **Sequential or roughly-sequential writes** (append-mostly)
+✓ **Storage cost matters** (compression helps; flash wear matters)
+✓ **Willing to tune** (many knobs to optimize)
+
+LSM-trees struggle when:
+
+✗ **Read-heavy random lookups** (bloom filters help but read amp remains)
+✗ **Need guaranteed low latency** (compaction can cause tail latency spikes)
+✗ **Range queries on arbitrary keys** (require merging across levels)
+✗ **Small working set fits in memory** (B-tree with good caching is simpler)
+
+# Real-World Systems
+
+## RocksDB (Facebook)
+
+Embedded key-value store. Powers:
+- MySQL storage engine (MyRocks)
+- Streaming state (Kafka Streams, Flink)
+- Blockchain (Bitcoin, Ethereum clients)
+
+**Optimizations**:
+- Column families (separate LSM-trees with shared WAL)
+- Multi-threaded compaction
+- Ribbon filters (30% smaller than bloom filters)
+
+## Apache Cassandra
+
+Distributed database. Uses LSM-trees for storage on each node.
+
+**Architecture**:
+- Memtable → SSTable flush
+- Tiered compaction (size-tiered or leveled, configurable)
+- Bloom filters per SSTable
+
+## LevelDB (Google)
+
+Original LSM implementation by Jeff Dean and Sanjay Ghemawat.
+
+Simpler than RocksDB (single-threaded compaction), but well-tested. Used in:
+- Chrome browser (IndexedDB backend)
+- Bitcoin Core
+- Many embedded systems
+
+# Conclusion: The LSM-Tree Trade-off
+
+LSM-trees make a deliberate choice:
+
+**Optimize for writes** by converting random I/O into sequential I/O, deferring the cost to background compaction.
+
+**Pay for reads** with amplification across levels, mitigated by bloom filters and caching.
+
+This trade-off is exactly right for write-heavy, append-mostly workloads—which describes an enormous fraction of modern data systems.
+
+Understanding LSM-trees means understanding:
+- How primitives compose (memtable + WAL + SSTables + bloom filters + compaction)
+- How trade-off dimensions manifest (write amp, read amp, space amp)
+- How tuning parameters shift those trade-offs
+
+In the next article, we'll contrast this with B-trees—the read-optimized alternative—and understand when each primitive is the right choice.
+
+---
+
+*Next: B-Trees — The Read-Optimized Classic*
