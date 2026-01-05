@@ -1,0 +1,337 @@
+---
+title: "Trade-off Dimensions"
+subtitle: "The Cost of Every Choice"
+author: "Taras Tsugrii"
+date: today
+bibliography: ../references.bib
+---
+
+# Every Decision Has a Price
+
+In the first article, we established that there is no "best" system design—only trade-offs. In the second, we catalogued the primitives from which systems are built. Now we need to understand the **dimensions** along which those trade-offs occur.
+
+A trade-off dimension is an axis where optimizing in one direction costs you in another. Understanding these dimensions gives you a vocabulary for reasoning about design choices and their consequences.
+
+# The RUM Conjecture: A Fundamental Limit
+
+The RUM Conjecture, formalized by Athanassoulis, Idreos, and others, states a fundamental constraint on storage access methods [@athanassoulis2023data]:
+
+> An access method that sets an upper bound for two of the Read, Update, and Memory overheads necessarily sets a lower bound for the third.
+
+This isn't just an observation—it's a mathematical constraint. You cannot escape it by being clever. You can only choose which overhead to accept.
+
+## The Three Overheads
+
+**Read Overhead (RO)**: How much extra data must you access to retrieve what you want?
+
+$$RO = \frac{\text{Base data read} + \text{Auxiliary data read}}{\text{Data returned}}$$
+
+A full table scan has high read overhead. An index lookup has low read overhead (you read the index plus only the relevant rows).
+
+**Update Overhead (UO)**: How much extra work to modify data?
+
+$$UO = \frac{\text{Base data written} + \text{Auxiliary data written}}{\text{Logical data modified}}$$
+
+In-place updates in a B-tree have moderate update overhead. LSM-trees, which write to a memtable and later compact, have different update overhead characteristics depending on how you measure (immediate vs. amortized).
+
+**Memory Overhead (MO)**: How much extra space do you need?
+
+$$MO = \frac{\text{Base data stored} + \text{Auxiliary data stored}}{\text{Base data stored}}$$
+
+A heap with no indexes has MO ≈ 1. Add a B-tree index, and MO increases. Add a bloom filter, MO increases a bit more.
+
+## RUM in Practice
+
+Consider three archetypal designs:
+
+| Design | Read Overhead | Update Overhead | Memory Overhead |
+|--------|--------------|-----------------|-----------------|
+| **Heap (no index)** | High (scan) | Low | Low |
+| **B-tree indexed** | Low | Moderate | Moderate |
+| **LSM-tree** | Moderate | Low (sequential) | Higher (multiple versions) |
+
+The heap optimizes update and memory at the cost of reads. B-trees optimize reads at the cost of updates and memory. LSM-trees optimize updates at the cost of reads and memory.
+
+You cannot have all three. Pick two.
+
+# Amplification Factors
+
+A useful way to quantify trade-offs is through **amplification factors**: how much more work does the system do compared to the logical operation?
+
+## Write Amplification
+
+Write amplification is the ratio of bytes actually written to storage versus bytes logically written by the application.
+
+$$\text{Write Amplification} = \frac{\text{Physical bytes written}}{\text{Logical bytes written}}$$
+
+**Concrete numbers** from research comparing RocksDB (LSM) and WiredTiger (B-tree) on a 500GB dataset with 32-byte records:
+
+| System | Write Amplification |
+|--------|---------------------|
+| RocksDB (LSM-tree) | 38× |
+| WiredTiger (B-tree, 8KB pages) | 268× |
+| WiredTiger (B-tree, 16KB pages) | 530× |
+
+Why is B-tree write amplification so high? When you modify a 32-byte record within an 8KB page, the entire page must be written. That's 256× amplification just from page granularity—before considering other factors like WAL writes.
+
+LSM-trees batch writes sequentially, amortizing the cost. But they pay elsewhere: compaction requires re-reading and re-writing data, contributing to their amplification factor.
+
+## Read Amplification
+
+Read amplification is how much data you read to satisfy a query.
+
+$$\text{Read Amplification} = \frac{\text{Physical bytes read}}{\text{Logical bytes needed}}$$
+
+For an LSM-tree point lookup:
+- Check memtable (in memory)
+- Check bloom filters for each level (fast)
+- On bloom filter hit, read SSTable block
+- Potentially check multiple SSTables if key isn't found
+
+Worst case: you read from every level. Best case: bloom filters save you from most disk reads.
+
+For a B-tree point lookup:
+- Traverse from root to leaf: O(log N) pages
+- Each page read brings you to the next level
+
+More predictable, but each read involves random I/O.
+
+## Space Amplification
+
+Space amplification is how much storage you use compared to the logical data size.
+
+$$\text{Space Amplification} = \frac{\text{Physical storage used}}{\text{Logical data size}}$$
+
+LSM-trees can have significant space amplification during compaction, when old and new versions of data temporarily coexist. Leveled compaction bounds this at ~1.1×. Size-tiered compaction can be 2× or more.
+
+B-trees have modest space amplification from internal nodes and page fragmentation, typically 1.5-2×.
+
+# The CAP Theorem and PACELC
+
+In distributed systems, the CAP theorem defines a fundamental trade-off:
+
+> A distributed system can provide at most two of: **C**onsistency, **A**vailability, **P**artition tolerance.
+
+Since network partitions are inevitable, the practical choice is between consistency and availability during partitions.
+
+But CAP only describes behavior during failures. What about normal operation?
+
+## PACELC: The Full Picture
+
+Daniel Abadi proposed PACELC to extend CAP:
+
+> If there is a **P**artition, choose between **A**vailability and **C**onsistency.
+> **E**lse (normal operation), choose between **L**atency and **C**onsistency.
+
+This captures something practitioners know intuitively: even when everything is working, there's a trade-off between how fast you respond and how consistent your data is.
+
+**Strong consistency** requires coordination:
+- Synchronous replication to all replicas
+- Consensus protocols (Paxos, Raft)
+- Wait for acknowledgment before responding
+
+This adds latency—often significantly. A cross-datacenter write with synchronous replication might add 50-100ms.
+
+**Relaxed consistency** enables speed:
+- Asynchronous replication
+- Read from local replica (potentially stale)
+- Respond immediately, replicate in background
+
+Sub-millisecond responses, but you might read yesterday's data.
+
+## Real Systems on the PACELC Spectrum
+
+| System | Partition (PA/PC) | Else (EL/EC) |
+|--------|-------------------|--------------|
+| **DynamoDB** | PA | EL |
+| **Cassandra** | PA | EL |
+| **PostgreSQL** | PC | EC |
+| **Spanner** | PC | EC |
+| **MongoDB** (default) | PA | EC |
+
+Systems like DynamoDB and Cassandra prioritize availability and latency—they're designed for workloads where stale reads are acceptable. PostgreSQL and Spanner prioritize consistency—they're for workloads where correctness matters more than speed.
+
+# Latency vs. Throughput
+
+Little's Law gives us a mathematical relationship:
+
+$$L = \lambda \times W$$
+
+Where:
+- $L$ = average number of items in the system
+- $\lambda$ = arrival rate (throughput)
+- $W$ = average time in system (latency)
+
+Rearranging: $W = L / \lambda$
+
+The insight: **latency and throughput are coupled through queue depth**. You cannot optimize them independently.
+
+## The Trade-off in Practice
+
+To maximize throughput:
+- Batch operations together
+- Keep the pipeline full
+- Accept higher average latency
+
+To minimize latency:
+- Process immediately on arrival
+- Keep queues short
+- Accept lower maximum throughput
+
+Consider a database write path:
+- **Low latency**: fsync on every write. 1-10ms per write, limited throughput.
+- **High throughput**: Group commit. Batch writes, fsync once. Higher average latency, but 10-100× more writes per second.
+
+## Tail Latency: The P99 Problem
+
+Mean and median latency hide the worst cases. In practice, the **99th percentile (P99)** matters more:
+
+> P99 latency is the response time that 99% of requests beat. Only 1% take longer.
+
+Why P99 matters:
+1. **Scale amplifies outliers**: 1 million requests × 1% = 10,000 slow requests per day
+2. **Compound effects**: If a request requires 5 parallel calls each with 99% success at <100ms, only 95% of total requests meet the target
+3. **User perception**: Users remember the one slow page load
+
+Common P99 killers:
+- Garbage collection pauses
+- Network retries
+- Cold cache misses
+- Noisy neighbors in shared infrastructure
+- Background compaction/maintenance
+
+The trade-off: optimizing P99 often requires sacrificing simplicity or efficiency. Hedged requests (issuing duplicate calls) improve P99 but double load. Aggressive caching helps but adds complexity.
+
+# Space-Time Trade-offs
+
+The classic computer science trade-off: use more space to save time, or use more time to save space.
+
+## Precomputation
+
+**Materialized views** store query results:
+- Trade-off: Storage space + staleness for query speed
+- Use when: Query is expensive, data changes slowly, latency matters
+
+**Indexes** store sorted/hashed keys:
+- Trade-off: Storage + write overhead for read speed
+- Use when: Read-heavy, selective queries
+
+**Caches** store frequently accessed data:
+- Trade-off: Memory for latency
+- Use when: Hot data fits in memory, hit rate is high
+
+## Compression
+
+Compression inverts the trade-off: use CPU time to save space (and often bandwidth).
+
+| Algorithm | Compression Ratio | Speed | Use Case |
+|-----------|------------------|-------|----------|
+| **LZ4** | Low (~2×) | Very fast | Real-time, high throughput |
+| **Snappy** | Low (~2×) | Very fast | Similar to LZ4, Google ecosystem |
+| **Zstd** | Medium-high (~3-5×) | Fast | Balanced, tunable levels |
+| **gzip** | Medium (~3-4×) | Moderate | Broad compatibility |
+| **zlib** | Medium | Moderate | HTTP, general purpose |
+
+The right choice depends on your bottleneck. If you're CPU-bound, don't compress. If you're I/O-bound, compression saves time despite CPU cost.
+
+## Denormalization
+
+In databases, normalization eliminates redundancy. Denormalization reintroduces it deliberately:
+- Trade-off: Storage + update complexity for read speed
+- Normalized: One fact in one place, joins required
+- Denormalized: Duplicated data, faster reads, risk of inconsistency
+
+# Consistency vs. Performance
+
+Beyond CAP/PACELC, there's a spectrum of consistency models with different costs:
+
+| Model | Guarantee | Cost |
+|-------|-----------|------|
+| **Linearizable** | Operations appear instantaneous and ordered globally | Highest latency, requires coordination |
+| **Sequential** | All processes see operations in same order | High coordination |
+| **Causal** | Causally related operations ordered; concurrent operations may differ | Moderate overhead |
+| **Eventual** | All replicas converge eventually | Lowest latency, temporary inconsistency |
+
+Each step down the ladder trades correctness guarantees for performance. The right choice depends on what your application actually needs.
+
+Example: A social media "like" count can be eventually consistent—off by a few for a moment is fine. A bank balance should be strongly consistent—off by a few dollars is not fine.
+
+# Complexity vs. Optimality
+
+Not all trade-offs are technical. Often the deepest trade-off is between system complexity and optimal performance.
+
+## Amdahl's Law
+
+Amdahl's Law quantifies the limits of parallel speedup:
+
+$$S = \frac{1}{(1 - P) + \frac{P}{N}}$$
+
+Where:
+- $S$ = speedup factor
+- $P$ = fraction of work that can be parallelized
+- $N$ = number of parallel processors
+
+If 25% of your work is sequential (P = 0.75), infinite parallel resources give you at most 4× speedup. The sequential portion dominates.
+
+Implication: Sometimes the "optimal" solution requires complexity in the sequential path that doesn't pay off. A simpler, slightly less optimal design may be the right choice.
+
+## The Maintenance Tax
+
+Every optimization adds code. Code requires:
+- Understanding (cognitive load)
+- Testing
+- Debugging
+- Updating when requirements change
+
+A hand-tuned query plan might be 2× faster than the optimizer's choice. But:
+- Does the DBA understand it?
+- What happens when data distribution changes?
+- Who updates it during the 3 AM incident?
+
+The 2× gain may not be worth the maintenance tax.
+
+## The General-Purpose Premium
+
+General-purpose solutions are rarely optimal for specific workloads. But they:
+- Are well-tested
+- Have community support
+- Have known failure modes
+- Are understood by new team members
+
+Custom solutions can be 10× faster but 100× more expensive to maintain.
+
+# Quantifying Trade-offs
+
+The goal isn't to eliminate trade-offs—it's to make them explicit and measurable.
+
+For any design decision, ask:
+1. **What are we optimizing for?** (Read latency? Write throughput? Storage cost?)
+2. **What are we trading away?** (Write performance? Memory? Complexity?)
+3. **Can we quantify the trade-off?** (2× write amplification for 10× read improvement)
+4. **Is the trade-off appropriate for our workload?** (Read-heavy? Write-heavy? Mixed?)
+
+## A Framework for Comparison
+
+When evaluating options, create a trade-off matrix:
+
+| Metric | Option A | Option B | Option C |
+|--------|----------|----------|----------|
+| Read latency (P99) | 5ms | 2ms | 10ms |
+| Write latency (P99) | 2ms | 20ms | 1ms |
+| Write amplification | 30× | 200× | 5× |
+| Space amplification | 1.5× | 1.2× | 2.5× |
+| Operational complexity | Medium | Low | High |
+
+Now the conversation isn't "which is best?" but "which trade-offs fit our needs?"
+
+# What's Next
+
+We now have:
+1. A vocabulary of **primitives** (the atoms)
+2. An understanding of **trade-off dimensions** (the axes)
+
+What we need is a **process**—a systematic way to approach design problems. In the next article, we'll apply Polya's problem-solving framework to system design, giving structure to the process of understanding requirements, exploring options, and making decisions.
+
+---
+
+*Next: [A Problem-Solving Framework](04-problem-solving.qmd)*
