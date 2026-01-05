@@ -14,7 +14,7 @@ book:
     - part: "Part I: Foundations"
       chapters:
         - articles/01-design-space.qmd
-        # - articles/02-primitives.qmd
+        - articles/02-primitives.qmd
         # - articles/03-tradeoffs.qmd
         # - articles/04-problem-solving.qmd
     # - part: "Part II: Primitives Deep-Dives"

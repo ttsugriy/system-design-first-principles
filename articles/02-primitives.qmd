@@ -1,0 +1,343 @@
+---
+title: "Primitives"
+subtitle: "The Atoms of System Design"
+author: "Taras Tsugrii"
+date: today
+bibliography: ../references.bib
+---
+
+# The Periodic Table of System Design
+
+In chemistry, the periodic table organizes elements by their fundamental properties. Hydrogen, carbon, oxygen—each has distinct characteristics, but combined in different ways, they form everything from water to DNA to diesel fuel.
+
+System design has a similar structure. There are fundamental **primitives**—building blocks with well-defined behaviors and trade-offs. Complex systems like PostgreSQL, Kafka, or DynamoDB aren't magical. They're compositions of these primitives, assembled to achieve specific trade-off profiles.
+
+Understanding the primitives lets you reason about systems you've never seen before. Instead of memorizing "Cassandra uses LSM-trees," you understand *why* a write-heavy distributed database would choose append-only storage with background compaction.
+
+# What Is a Primitive?
+
+A primitive is a fundamental building block with:
+
+1. **A clear purpose** — what problem it solves
+2. **A defined interface** — how you interact with it
+3. **A trade-off signature** — what you gain and what you pay
+
+Primitives can be combined. An LSM-tree isn't a primitive—it's a *composition* of primitives: a memtable (in-memory sorted structure), SSTables (immutable sorted files), a write-ahead log (durability), bloom filters (probabilistic membership), and a compaction strategy (space reclamation).
+
+Understanding the primitives means you can understand—and even invent—new compositions.
+
+# The Primitive Catalog
+
+Let's survey the major categories of primitives you'll encounter in data-intensive systems.
+
+## 1. Data Organization Primitives
+
+These primitives determine how data is laid out in memory or on disk.
+
+### Sorted vs. Unsorted
+
+**Sorted storage** keeps data ordered by key:
+
+- Enables binary search: O(log n) lookups
+- Supports range queries efficiently
+- Requires maintaining order on writes (more expensive)
+
+**Unsorted storage** (heap, append-only):
+
+- Fast writes: just append
+- Requires scanning for lookups (or secondary index)
+- No natural support for range queries
+
+*Example*: B-trees maintain sorted order; log-structured storage appends unsorted, then sorts during compaction.
+
+### Row vs. Column Orientation
+
+**Row-oriented** stores all columns of a record together:
+
+- Efficient for accessing entire records
+- Good for OLTP (transactional) workloads
+- Poor for analytics scanning single columns across many rows
+
+**Column-oriented** stores each column separately:
+
+- Excellent compression (similar values together)
+- Fast aggregations over single columns
+- Terrible for fetching complete records
+
+*Example*: PostgreSQL is row-oriented; ClickHouse is column-oriented.
+
+### Dense vs. Sparse
+
+**Dense structures** allocate space for every possible key:
+
+- O(1) access if keys are integers in a range
+- Wasteful for sparse key spaces
+
+**Sparse structures** only store keys that exist:
+
+- Space-efficient for sparse data
+- Requires lookup mechanism (tree, hash)
+
+*Example*: An array is dense; a hash table is sparse.
+
+## 2. Index Structures
+
+Indexes are auxiliary data structures that speed up queries at the cost of write overhead and space.
+
+### B-tree
+
+The workhorse of databases. A self-balancing tree optimized for systems that read and write large blocks of data.
+
+| Aspect | Characteristic |
+|--------|----------------|
+| Lookup | O(log n) |
+| Range queries | Excellent |
+| Write cost | Moderate (in-place updates, page splits) |
+| Space | Moderate overhead |
+
+B-trees support equality, range queries, prefix matching, and can optimize ORDER BY operations. They're the default choice for most database indexes.
+
+### Hash Index
+
+Direct mapping from key to location via hash function.
+
+| Aspect | Characteristic |
+|--------|----------------|
+| Lookup | O(1) average |
+| Range queries | Not supported |
+| Write cost | Low |
+| Space | Low overhead |
+
+Hash indexes are *only* useful for exact-match queries. If you need `WHERE id = 5`, a hash is fastest. If you need `WHERE id > 5`, it's useless.
+
+### Bloom Filter
+
+A probabilistic structure that answers "Is this key *possibly* in the set?" with no false negatives but possible false positives.
+
+| Aspect | Characteristic |
+|--------|----------------|
+| Lookup | O(k) where k = hash functions |
+| Space | Very small (bits per key) |
+| False positives | Yes, tunable |
+| False negatives | Never |
+
+The math: with *m* bits and *k* hash functions for *n* elements, the false positive rate is approximately:
+
+$$f \approx \left(1 - e^{-kn/m}\right)^k$$
+
+Optimal *k* ≈ (m/n) × ln(2), giving roughly 1% false positive rate at ~10 bits per key.
+
+Bloom filters are essential in LSM-trees, saving disk reads by quickly determining a key *isn't* in a particular SSTable.
+
+### Skip List
+
+A probabilistic alternative to balanced trees. Multiple layers of linked lists where higher layers skip over elements, enabling O(log n) search.
+
+| Aspect | Characteristic |
+|--------|----------------|
+| Lookup | O(log n) expected |
+| Range queries | Supported |
+| Implementation | Simpler than balanced trees |
+| Space | O(n) with ~2n pointers on average |
+
+Redis uses skip lists for sorted sets because they're simpler to implement than red-black trees and perform comparably. The randomized structure means no complex rebalancing.
+
+## 3. Durability Primitives
+
+These ensure data survives crashes.
+
+### Write-Ahead Log (WAL)
+
+The fundamental durability primitive: **never modify data before logging the intent**.
+
+The WAL contains a sequential record of all changes. On crash recovery:
+
+1. **Analysis phase**: Scan log to find incomplete transactions
+2. **Redo phase**: Replay committed transactions
+3. **Undo phase**: Rollback uncommitted transactions
+
+WAL trades write amplification (every change written twice) for durability and atomic commits.
+
+### Checkpointing
+
+Periodically flush dirty pages to disk and record the log position. This limits how much WAL must be replayed on recovery and allows log truncation.
+
+Trade-off: More frequent checkpoints mean faster recovery but more I/O overhead during normal operation.
+
+### fsync
+
+The primitive that actually guarantees durability—forcing the OS to flush buffers to physical storage. Without fsync, data may sit in OS caches and vanish on power loss.
+
+Trade-off: fsync is *slow* (milliseconds). Batching multiple writes before fsync (group commit) dramatically improves throughput.
+
+## 4. Immutability Primitives
+
+Immutable structures never modify data in place. They only append.
+
+### SSTable (Sorted String Table)
+
+An immutable, sorted file of key-value pairs. Once written, never modified.
+
+Key properties:
+
+- Binary search for lookups (O(log n))
+- Efficient range scans
+- No update-in-place overhead
+- Requires compaction to reclaim space from deleted/updated keys
+
+SSTables are the on-disk component of LSM-trees, used by RocksDB, LevelDB, Cassandra, and many others.
+
+### Memtable
+
+An in-memory sorted structure (often a skip list or red-black tree) that buffers writes before flushing to SSTables.
+
+Trade-off: Larger memtables mean fewer flushes (less write amplification) but more memory usage and potentially longer recovery times.
+
+### Compaction
+
+The process of merging multiple immutable files into fewer, larger files while removing obsolete entries.
+
+Strategies include:
+
+- **Size-tiered**: Merge similarly-sized files. Simple, good write throughput.
+- **Leveled**: Organize files into levels with increasing size. Better read performance, higher write amplification.
+- **FIFO**: Just delete old files. For time-series with TTL.
+
+## 5. Concurrency Primitives
+
+How multiple transactions interact.
+
+### Locking
+
+Acquire exclusive access to data before modifying it. Simple but creates contention.
+
+- **Pessimistic**: Lock before reading/writing
+- **Optimistic**: Proceed without locks, check for conflicts at commit
+
+### MVCC (Multi-Version Concurrency Control)
+
+Maintain multiple versions of each row. Readers see a consistent snapshot; writers create new versions.
+
+| Aspect | MVCC | Locking |
+|--------|------|---------|
+| Read/write contention | None | High |
+| Storage overhead | Higher | Lower |
+| Implementation complexity | Higher | Lower |
+| Suitable for | Read-heavy OLTP | Write-heavy with simple access |
+
+MVCC enables non-blocking reads—readers never wait for writers and vice versa. PostgreSQL, MySQL InnoDB, and Oracle all use MVCC.
+
+The cost: garbage collection (vacuum) to remove obsolete versions, and potential for table bloat if cleanup falls behind.
+
+## 6. Distribution Primitives
+
+How data is spread across machines.
+
+### Partitioning (Sharding)
+
+Divide data across nodes by key.
+
+**Range partitioning**: Keys A-M on node 1, N-Z on node 2.
+
+- Supports range queries within partitions
+- Risk of hot spots if key distribution is skewed
+
+**Hash partitioning**: Hash the key to determine node.
+
+- Even distribution regardless of key patterns
+- Range queries require hitting all partitions
+
+### Consistent Hashing
+
+Hash partitioning that minimizes redistribution when nodes join/leave.
+
+Keys and nodes both mapped to a ring. Each key goes to the first node clockwise from its position. Adding a node only redistributes keys from its neighbors, not the entire cluster.
+
+Trade-off: More complex implementation, but essential for dynamic clusters.
+
+### Replication
+
+Maintain copies of data on multiple nodes for fault tolerance and read scaling.
+
+- **Synchronous**: Wait for replicas before acknowledging write. Stronger consistency, higher latency.
+- **Asynchronous**: Acknowledge immediately, replicate in background. Lower latency, risk of data loss.
+
+## 7. Caching Primitives
+
+Speed up reads by keeping hot data in faster storage.
+
+### Cache Placement Strategies
+
+- **Write-through**: Write to cache and backing store simultaneously. Simple, consistent.
+- **Write-back**: Write to cache only, flush later. Fast writes, risk of data loss.
+- **Write-around**: Write directly to backing store, bypass cache. Avoids cache pollution.
+
+### Eviction Policies
+
+When the cache is full, which entry to remove?
+
+- **LRU (Least Recently Used)**: Evict the oldest-accessed item. Good for temporal locality.
+- **LFU (Least Frequently Used)**: Evict the least-accessed item. Good for stable popularity patterns.
+- **FIFO**: Evict oldest entry. Simple but often suboptimal.
+
+LRU adapts quickly to changing access patterns. LFU keeps consistently popular items but is slow to adapt. Real systems often use approximations (sampled LRU) for efficiency.
+
+# Primitives Compose
+
+The power of primitives is composition. Consider how an LSM-tree assembles them:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                       LSM-tree                              │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐     │
+│  │  Memtable   │    │     WAL     │    │Bloom Filters│     │
+│  │ (skip list) │    │ (durability)│    │(probabilistic)    │
+│  └──────┬──────┘    └─────────────┘    └─────────────┘     │
+│         │ flush                                             │
+│         ▼                                                   │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │              SSTables (immutable, sorted)            │   │
+│  │   Level 0: ████ ████ ████                           │   │
+│  │   Level 1: ████████████████                         │   │
+│  │   Level 2: ████████████████████████████████         │   │
+│  └─────────────────────────────────────────────────────┘   │
+│              ↑ compaction                                   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Each primitive contributes:
+
+- **Memtable**: Fast in-memory writes, sorted for efficient flush
+- **WAL**: Durability before memtable flush
+- **SSTables**: Efficient sorted storage, immutable
+- **Bloom filters**: Skip SSTables that don't contain the key
+- **Compaction**: Reclaim space, reduce read amplification
+
+By understanding each primitive, you understand why LSM-trees have their particular trade-off profile: excellent write throughput, tunable read performance, background CPU/IO for compaction.
+
+# The Primitive Mindset
+
+When you encounter a new system, ask:
+
+1. **What primitives does it use?** (B-tree? LSM? Hash? WAL?)
+2. **Why those primitives?** (What workload is it optimized for?)
+3. **What trade-offs follow?** (What's the cost?)
+
+When designing a system, ask:
+
+1. **What are my access patterns?** (Read-heavy? Write-heavy? Range queries?)
+2. **What primitives fit those patterns?**
+3. **How should I compose them?**
+
+This is the primitive mindset: decompose, understand, compose.
+
+# What's Next
+
+Now that we have a vocabulary of primitives, we can talk more precisely about **trade-off dimensions**—the axes along which every design choice moves you. That's the subject of the next article.
+
+We'll see how the RUM conjecture, CAP theorem, and other trade-off frameworks connect to specific primitive choices, and develop quantitative intuition for the costs involved.
+
+---
+
+*Next: [Trade-off Dimensions — The Cost of Every Choice](03-tradeoffs.qmd)*
