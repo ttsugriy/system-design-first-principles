@@ -1,0 +1,52 @@
+project:
+  type: book
+  output-dir: _site
+
+book:
+  title: "System Design from First Principles"
+  author: "Taras Tsugrii"
+  date: today
+  repo-url: https://github.com/ttsugriy/system-design-first-principles
+  repo-actions: [edit, issue]
+
+  chapters:
+    - index.qmd
+    - part: "Part I: Foundations"
+      chapters:
+        - articles/01-design-space.qmd
+        # - articles/02-primitives.qmd
+        # - articles/03-tradeoffs.qmd
+        # - articles/04-problem-solving.qmd
+    # - part: "Part II: Primitives Deep-Dives"
+    #   chapters:
+    #     - articles/05-data-organization.qmd
+    #     - articles/06-access-structures.qmd
+    #     - articles/07-consistency-coordination.qmd
+    #     - articles/08-caching-tiering.qmd
+    # - part: "Part III: Composition"
+    #   chapters:
+    #     - articles/09-combining-primitives.qmd
+    #     - articles/10-case-kv-store.qmd
+    #     - articles/11-case-timeseries.qmd
+    #     - articles/12-case-distributed-queue.qmd
+    # - part: "Part IV: The AI Era"
+    #   chapters:
+    #     - articles/13-ai-design-exploration.qmd
+    #     - articles/14-self-designing-systems.qmd
+
+format:
+  html:
+    theme:
+      light: flatly
+      dark: darkly
+    code-fold: true
+    code-tools: true
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    highlight-style: github
+
+execute:
+  freeze: auto
+
+bibliography: references.bib

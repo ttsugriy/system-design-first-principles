@@ -1,0 +1,45 @@
+---
+title: "System Design from First Principles"
+---
+
+# Welcome {.unnumbered}
+
+This is a first-principles exploration of **system design** — the art and science of making good architectural decisions when building data-intensive systems.
+
+## What This Series Is
+
+A journey from foundations to practice, organized around a core insight: *there is no "best" system design*. Every choice involves trade-offs, and understanding those trade-offs is the essence of good design.
+
+- **Part I: Foundations** — The design space, primitives, trade-offs, and a problem-solving framework
+- **Part II: Primitives Deep-Dives** — The building blocks of all systems
+- **Part III: Composition** — How primitives combine to form real systems
+- **Part IV: The AI Era** — AI as a design space explorer
+
+## Who This Is For
+
+- Software engineers who want to *understand* system design, not just memorize patterns
+- Performance engineers who know that understanding enables optimization
+- Anyone preparing for system design discussions who wants depth, not just breadth
+- Practitioners who appreciate quantitative reasoning about trade-offs
+
+## The Approach
+
+We draw on three key influences:
+
+1. **Stratos Idreos' design space work** — The idea that all data structures can be understood as combinations of fundamental primitives, with predictable trade-offs
+2. **Polya's problem-solving framework** — Understand before solving, devise before executing, verify before moving on
+3. **First-principles thinking** — Derive solutions from fundamentals rather than memorizing patterns
+
+We also bring a **performance engineering mindset**: every design choice has a cost, and the goal is to understand what you're paying for.
+
+## Getting Started
+
+Start with [Article 1: The Design Space Problem](articles/01-design-space.qmd) to understand why there's no "best" design and how to think about the space of all possible solutions.
+
+## Also Published On
+
+This series is also available on [Software Bits](https://softwarebits.substack.com/) on Substack.
+
+---
+
+*This book is a work in progress. New articles are added as they're completed.*

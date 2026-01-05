@@ -1,0 +1,165 @@
+---
+title: "The Design Space Problem"
+subtitle: "Why There Is No 'Best' System Design"
+author: "Taras Tsugrii"
+date: today
+bibliography: ../references.bib
+---
+
+# The Question That Doesn't Have an Answer
+
+"What's the best database for my application?"
+
+If you've ever asked this question in an interview, on Stack Overflow, or to a more senior engineer, you've likely received an unsatisfying answer: "It depends."
+
+This isn't a cop-out. It's the most honest answer possible, and understanding *why* is the first step toward becoming genuinely good at system design.
+
+The uncomfortable truth is that there is no "best" system design. There are only trade-offs—and your job is to make the right trade-offs for your specific situation.
+
+# The RUM Conjecture: You Can't Have It All
+
+In 2016, researchers from Harvard formalized something practitioners had known intuitively for decades: you cannot optimize everything simultaneously. They called it the **RUM Conjecture** [@athanassoulis2023data].
+
+RUM stands for three fundamental costs in any storage system:
+
+- **R**ead overhead — how much extra work to retrieve data
+- **U**pdate overhead — how much extra work to modify data
+- **M**emory overhead — how much extra space required
+
+The conjecture states: *an access method that sets an upper bound for two of these overheads necessarily sets a lower bound for the third*.
+
+In plain English: pick any two to optimize, and you *will* pay with the third.
+
+## A Concrete Example: B-trees vs LSM-trees
+
+This isn't abstract theory. Consider the two most important indexing structures in databases today:
+
+**B-trees** (used by PostgreSQL, MySQL InnoDB, most traditional databases):
+
+- Excellent read performance — O(log N) lookups with minimal disk reads
+- Reasonable memory usage — auxiliary index size is predictable
+- Poor write performance — every update requires random I/O to update the tree in place
+
+**LSM-trees** (used by RocksDB, LevelDB, Cassandra, ScyllaDB):
+
+- Excellent write performance — all writes are sequential (append-only)
+- Poor read performance — may need to search multiple levels
+- Variable memory/space — requires background compaction
+
+The choice between them isn't about which is "better." It's about your workload:
+
+| Workload | Better Choice | Why |
+|----------|---------------|-----|
+| Read-heavy OLTP | B-tree | Optimizes for fast point lookups |
+| Write-heavy logging | LSM-tree | Optimizes for sequential write throughput |
+| Mixed workload | Depends | Need to analyze actual read/write ratios |
+
+The performance difference isn't marginal. Write amplification—the ratio of actual bytes written to intended bytes—can differ by 10-50x between these structures for write-heavy workloads.
+
+# The Design Space Is Vast
+
+Here's where it gets interesting: B-trees and LSM-trees aren't the only options. They're just two points in an enormous space of possible designs.
+
+Consider just a few dimensions of choice for a key-value store:
+
+1. **Data organization**: sorted vs. unsorted, row vs. column, dense vs. sparse
+2. **Update strategy**: in-place vs. out-of-place (append-only)
+3. **Index structure**: tree, hash, trie, learned index
+4. **Buffer management**: write-through, write-back, write-around
+5. **Compression**: none, dictionary, delta, general-purpose
+6. **Bloom filter settings**: bits per key, number of hash functions
+7. **Compaction strategy**: leveled, tiered, hybrid, lazy
+
+Each dimension has multiple valid choices. If we conservatively estimate 5 options per dimension across just 7 dimensions, that's 5^7 = 78,125 possible configurations.
+
+But it's worse than that. Many of these choices are *continuous*, not discrete. The size ratio between LSM levels, the Bloom filter false positive rate, the compaction trigger thresholds—these are all tunable parameters with infinite possible values.
+
+Modern database systems like MySQL and PostgreSQL have **hundreds** of tunable parameters. The configuration space isn't thousands of possibilities—it's effectively infinite.
+
+# The Problem with "Best Practices"
+
+This vastness explains why "best practices" so often fail.
+
+A best practice is, by definition, context-free advice: "Always use connection pooling." "Index your foreign keys." "Use SSDs for databases."
+
+These aren't wrong, exactly. They're just incomplete. They work when your context matches the implicit assumptions baked into the advice. When it doesn't, they can actively hurt.
+
+Consider "always use an index for faster queries." For a read-heavy workload with selective queries, this is excellent advice. But for a write-heavy workload with infrequent reads? Every index you add:
+
+- Increases write amplification
+- Consumes additional memory
+- Adds compaction/maintenance overhead
+
+The "best practice" becomes an anti-pattern when the workload changes.
+
+# Trade-offs All the Way Down
+
+The RUM conjecture is just one example of fundamental trade-offs. They appear at every level of system design:
+
+## CAP Theorem (Distributed Systems)
+
+You can have at most two of:
+
+- **C**onsistency — every read returns the most recent write
+- **A**vailability — every request receives a response
+- **P**artition tolerance — the system works despite network failures
+
+Since network partitions are unavoidable in distributed systems, you're really choosing between consistency and availability during failures.
+
+## PACELC Extension
+
+CAP only describes behavior during partitions. PACELC extends it: even when the system is running normally (**E**lse), there's a trade-off between **L**atency and **C**onsistency.
+
+Want strong consistency? You need synchronous replication, which adds latency.
+Want low latency? You need asynchronous replication, which risks stale reads.
+
+## Space-Time Trade-offs
+
+This classic computer science trade-off appears everywhere:
+
+- **Caching**: Use more memory to reduce computation
+- **Precomputation**: Use more storage to reduce query time
+- **Compression**: Use more CPU to reduce storage/bandwidth
+- **Denormalization**: Use more storage to reduce join complexity
+
+## Complexity-Optimality Trade-offs
+
+Often, the "optimal" solution is too complex to implement, operate, or debug:
+
+- A hand-tuned query might be 2x faster than the optimizer's plan
+- But what happens when the data distribution changes?
+- Who maintains the hand-tuned version?
+
+The "suboptimal" solution that's easier to understand and modify is often the better choice.
+
+# Why This Matters
+
+If you've internalized that there's no "best" design, you can approach system design problems correctly:
+
+1. **Start with requirements, not solutions**. What are the actual access patterns? What are the hard constraints vs. nice-to-haves?
+
+2. **Make trade-offs explicit**. Don't pretend you're getting something for free. If you optimize reads, acknowledge the write cost.
+
+3. **Design for your workload, not a generic one**. The "best" design for Twitter isn't the best design for a banking system.
+
+4. **Expect to revisit decisions**. Workloads change. What was optimal at 100 QPS may be wrong at 100,000 QPS.
+
+5. **Be skeptical of universal claims**. Any advice that says "always" or "never" is probably hiding its assumptions.
+
+# What's Next
+
+Understanding that trade-offs are fundamental is just the beginning. The next questions are:
+
+- What are the **primitives** — the fundamental building blocks — that all systems are composed of?
+- What are the **dimensions** along which trade-offs occur?
+- How do we **systematically explore** the design space for a given problem?
+
+That's what this series is about. We'll build a mental framework for decomposing any system into its constituent parts, understanding the trade-offs each part introduces, and composing them into designs that fit specific requirements.
+
+We'll draw on the research of Stratos Idreos and colleagues at Harvard, who have worked on formalizing the "design space" of data structures [@idreos2018periodic]. We'll apply Polya's problem-solving methodology to give structure to the design process [@polya1945solve]. And we'll see how AI tools can help explore the space of possibilities.
+
+But it all starts with accepting the fundamental premise: there is no best. There are only trade-offs. And that's what makes system design interesting.
+
+---
+
+*Next: [Primitives — The Atoms of System Design](02-primitives.qmd)*
