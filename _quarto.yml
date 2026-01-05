@@ -20,7 +20,7 @@ book:
     - part: "Part II: Primitives Deep-Dives"
       chapters:
         - articles/05-lsm-trees.qmd
-        # - articles/06-b-trees.qmd
+        - articles/06-b-trees.qmd
         # - articles/07-consensus.qmd
         # - articles/08-caching.qmd
     # - part: "Part III: Composition"
