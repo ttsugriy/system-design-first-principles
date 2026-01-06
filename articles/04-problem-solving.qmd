@@ -359,7 +359,7 @@ Let's see the complete framework applied to a different problem.
 
 ## Problem: Design a Rate Limiter
 
-### Step 1: Understand
+### Understand
 
 **Functional**: Limit API requests to N per time window per client. Return 429 when exceeded.
 
@@ -377,7 +377,7 @@ Let's see the complete framework applied to a different problem.
 - 100K clients × 100 requests/min = 10M requests/min = 167K QPS
 - Counter storage: 100K clients × 8 bytes = 800 KB (fits in memory)
 
-### Step 2: Devise Plan
+### Devise Plan
 
 **Core challenge**: Distributed counter that's fast and consistent enough.
 
@@ -395,7 +395,7 @@ Request ──► Rate Limiter Middleware ──► Redis (counters) ──► A
 
 **Algorithm**: Sliding window log or token bucket. Token bucket is simpler and handles bursts well.
 
-### Step 3: Execute
+### Execute
 
 **Technology**: Redis with atomic INCR and EXPIRE operations.
 
@@ -414,7 +414,7 @@ if current > limit:
 - Clock skew across servers: Use Redis server time, not local
 - Distributed race conditions: INCR is atomic; good enough for rate limiting
 
-### Step 4: Look Back
+### Verify
 
 **Validation**:
 - 1ms latency: Redis INCR is sub-ms ✓
