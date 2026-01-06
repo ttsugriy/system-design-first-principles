@@ -29,10 +29,10 @@ book:
         - articles/10-case-kv-store.qmd
         - articles/11-case-timeseries.qmd
         - articles/12-case-distributed-queue.qmd
-    # - part: "Part IV: The AI Era"
-    #   chapters:
-    #     - articles/13-ai-design-exploration.qmd
-    #     - articles/14-self-designing-systems.qmd
+    - part: "Part IV: The AI Era"
+      chapters:
+        - articles/13-ai-design-exploration.qmd
+        - articles/14-self-designing-systems.qmd
 
 format:
   html:

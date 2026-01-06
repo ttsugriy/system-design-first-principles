@@ -1,0 +1,695 @@
+---
+title: "Self-Designing Systems"
+subtitle: "From AI-Assisted to Autonomous"
+author: "Taras Tsugrii"
+date: today
+bibliography: ../references.bib
+---
+
+# The Vision: Systems That Design Themselves
+
+We've seen how AI can assist with individual design decisions: choosing indexes, tuning parameters, optimizing queries. But what if we took this further?
+
+**What if the system could design itself from first principles?**
+
+This is the vision behind self-designing data systems: given a workload description and resource constraints, automatically synthesize an optimal system.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Self-Designing System                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Input:                                                          │
+│    • Workload: 80% reads, 20% writes                             │
+│    • Latency: P99 < 10ms for reads                               │
+│    • Throughput: 100K ops/sec                                    │
+│    • Budget: 64GB RAM, 8 cores                                   │
+│                                                                  │
+│  Processing:                                                     │
+│    • Explore design space                                        │
+│    • Evaluate trade-offs                                         │
+│    • Synthesize optimal design                                   │
+│                                                                  │
+│  Output:                                                         │
+│    • Custom storage engine                                       │
+│    • Tuned parameters                                            │
+│    • Optimized data structures                                   │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+# From Primitives to Design Space
+
+Stratos Idreos' work on the "Periodic Table of Data Structures" provides the foundation. Just as chemistry has ~100 elements that combine into millions of compounds, system design has primitives that combine into countless designs.
+
+## The Primitive Vocabulary
+
+From earlier chapters, we have primitives like:
+
+```
+Data Organization:
+  • Sorted / Unsorted
+  • Row / Column
+  • Dense / Sparse
+
+Index Structures:
+  • B-tree / B+tree
+  • Hash index
+  • Skip list
+  • Bloom filter
+
+Storage Engines:
+  • LSM-tree
+  • B+tree with buffer pool
+  • Log-structured
+
+Replication:
+  • Single-leader
+  • Multi-leader
+  • Leaderless
+
+Consistency:
+  • Strong / Eventual
+  • Linearizable / Serializable
+```
+
+## The Combination Space
+
+The number of possible designs is astronomical:
+
+```
+Storage engine: 3 choices
+Index structure: 5 choices
+Compaction strategy: 4 choices
+Bloom filter config: continuous
+Buffer sizes: continuous
+Replication: 3 choices
+Consistency: 4 choices
+...
+
+Total combinations: effectively infinite
+```
+
+Traditional approach: an expert picks a standard design (PostgreSQL, Cassandra, etc.) and tunes it.
+
+Self-designing approach: search the space systematically to find optimal combinations.
+
+# The Design Continuum
+
+Idreos' research revealed that data structure design exists on a continuum, not as discrete choices:
+
+```
+                    Design Continuum
+
+  Pure B-tree ◄─────────────────────────────► Pure LSM-tree
+       │                                            │
+  Read optimized                           Write optimized
+  Update in place                          Append only
+  High write amplification                 High read amplification
+       │                                            │
+       └──────────► Hybrid designs ◄────────────────┘
+                  (configurable balance)
+```
+
+Any point on this continuum is achievable with the right primitive combinations:
+
+| Design Point | Configuration |
+|--------------|---------------|
+| B-tree-like | Large buffer pool, few levels, aggressive compaction |
+| LSM-like | Small buffer, many levels, lazy compaction |
+| Balanced | Medium buffer, tiered compaction, bloom filters |
+
+A self-designing system can find the exact point on this continuum that matches your workload.
+
+# Architecture of a Self-Designing System
+
+## SageDB: Learning to Build Databases
+
+SageDB (MIT) represents the state-of-the-art in self-designing databases:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         SageDB                                   │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌─────────────────┐     ┌─────────────────┐                     │
+│  │  Workload       │     │   Cost Model    │                     │
+│  │  Characterizer  │────►│   (Learned)     │                     │
+│  └─────────────────┘     └────────┬────────┘                     │
+│                                   │                              │
+│                                   ▼                              │
+│                    ┌─────────────────────────┐                   │
+│                    │    Design Synthesizer   │                   │
+│                    │  (Search algorithm +    │                   │
+│                    │   ML optimization)      │                   │
+│                    └───────────┬─────────────┘                   │
+│                                │                                 │
+│         ┌──────────────────────┼──────────────────────┐          │
+│         ▼                      ▼                      ▼          │
+│  ┌─────────────┐      ┌─────────────┐      ┌─────────────┐       │
+│  │   Learned   │      │   Storage   │      │    Query    │       │
+│  │   Indexes   │      │   Engine    │      │  Optimizer  │       │
+│  └─────────────┘      └─────────────┘      └─────────────┘       │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+Key components:
+
+1. **Workload Characterizer**: Analyzes query patterns, data distribution, access frequencies
+2. **Learned Cost Model**: Predicts performance of different designs
+3. **Design Synthesizer**: Searches for optimal primitive combinations
+4. **Component Generator**: Creates optimized implementations
+
+## NoisePage: The Self-Driving DBMS
+
+Carnegie Mellon's NoisePage takes a different approach: make an existing database self-driving.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                       NoisePage                                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────┐         │
+│  │              ML Control Plane                        │         │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌───────────┐  │         │
+│  │  │  Workload    │  │   Behavior   │  │  Action   │  │         │
+│  │  │  Forecaster  │  │   Modeler    │  │  Planner  │  │         │
+│  │  └──────────────┘  └──────────────┘  └───────────┘  │         │
+│  └─────────────────────────────────────────────────────┘         │
+│                              │                                   │
+│                              ▼                                   │
+│  ┌─────────────────────────────────────────────────────┐         │
+│  │              Autonomous Actions                      │         │
+│  │  • Create/drop indexes                               │         │
+│  │  • Tune configuration parameters                     │         │
+│  │  • Allocate/deallocate resources                     │         │
+│  │  • Schedule maintenance                              │         │
+│  └─────────────────────────────────────────────────────┘         │
+│                              │                                   │
+│                              ▼                                   │
+│  ┌─────────────────────────────────────────────────────┐         │
+│  │              Database Engine                         │         │
+│  │  (PostgreSQL-compatible storage and execution)       │         │
+│  └─────────────────────────────────────────────────────┘         │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+NoisePage's ML components:
+
+| Component | Purpose | Technique |
+|-----------|---------|-----------|
+| Workload Forecaster | Predict future query patterns | LSTM/RNN |
+| Behavior Modeler | Predict effect of changes | MB2 (decomposed modeling) |
+| Action Planner | Decide what changes to make | Reinforcement learning |
+
+# Design Space Exploration Algorithms
+
+## Exhaustive Search (Impractical)
+
+```python
+def exhaustive_search(primitives, workload, constraints):
+    best_design = None
+    best_score = float('-inf')
+
+    for design in all_combinations(primitives):
+        if satisfies_constraints(design, constraints):
+            score = evaluate(design, workload)
+            if score > best_score:
+                best_design = design
+                best_score = score
+
+    return best_design
+```
+
+Problem: Combinatorial explosion. With 10 primitives and 5 choices each, that's 5^10 ≈ 10 million designs. Add continuous parameters, and it's infinite.
+
+## Bayesian Optimization
+
+Use probabilistic models to guide search:
+
+```python
+def bayesian_optimization(primitives, workload, constraints, budget):
+    # Start with random samples
+    evaluated = random_sample(primitives, n=5)
+
+    for _ in range(budget):
+        # Fit Gaussian Process to evaluated designs
+        model = GaussianProcess.fit(evaluated)
+
+        # Use acquisition function to pick next design
+        # (balance exploration vs. exploitation)
+        next_design = maximize_acquisition(model, primitives)
+
+        # Evaluate and add to dataset
+        score = evaluate(next_design, workload)
+        evaluated.append((next_design, score))
+
+    return best_of(evaluated)
+```
+
+This converges to good solutions with far fewer evaluations.
+
+## Reinforcement Learning
+
+Treat design as a sequential decision process:
+
+```python
+def rl_design(primitives, workload, constraints):
+    state = initial_design()
+
+    while not done:
+        # Agent observes current design + workload
+        action = agent.select_action(state, workload)
+
+        # Apply action (add primitive, change parameter)
+        new_state = apply_action(state, action)
+
+        # Get reward (performance improvement)
+        reward = evaluate(new_state, workload) - evaluate(state, workload)
+
+        # Learn from experience
+        agent.learn(state, action, reward, new_state)
+
+        state = new_state
+
+    return state
+```
+
+RL excels when:
+- Design is built incrementally
+- Actions have long-term consequences
+- Workload changes over time
+
+# Workload Characterization
+
+The foundation of self-design is understanding the workload.
+
+## Key Dimensions
+
+| Dimension | Range | Impact |
+|-----------|-------|--------|
+| Read/Write ratio | 0-100% reads | Determines structure (B-tree vs LSM) |
+| Point vs Range | 0-100% point | Determines index type |
+| Key distribution | Uniform/Skewed/Zipf | Determines caching strategy |
+| Temporal pattern | Steady/Bursty/Periodic | Determines buffer sizes |
+| Concurrency | Low/Medium/High | Determines locking strategy |
+| Data size | MB/GB/TB/PB | Determines partitioning |
+
+## Automated Characterization
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Workload Characterization Pipeline                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Query Log:                                                      │
+│    SELECT * FROM users WHERE id = 42          ──┐                │
+│    SELECT * FROM orders WHERE user_id = 42    ──┤                │
+│    INSERT INTO events VALUES (...)            ──┤                │
+│    SELECT * FROM users WHERE age > 30         ──┘                │
+│                                   │                              │
+│                                   ▼                              │
+│                    ┌─────────────────────────┐                   │
+│                    │   Feature Extraction    │                   │
+│                    │   • Query types         │                   │
+│                    │   • Access patterns     │                   │
+│                    │   • Key distributions   │                   │
+│                    └───────────┬─────────────┘                   │
+│                                │                                 │
+│                                ▼                                 │
+│                    ┌─────────────────────────┐                   │
+│                    │   Workload Embedding    │                   │
+│                    │   (low-dimensional      │                   │
+│                    │    representation)      │                   │
+│                    └───────────┬─────────────┘                   │
+│                                │                                 │
+│                                ▼                                 │
+│                    ┌─────────────────────────┐                   │
+│                    │   Design Selector       │                   │
+│                    │   (match workload to    │                   │
+│                    │    optimal primitives)  │                   │
+│                    └─────────────────────────┘                   │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Workload Prediction
+
+Self-designing systems don't just analyze current workload—they predict future changes:
+
+```
+Past workload pattern:
+  Day 1:  OLTP (80% reads, 20% writes)
+  Day 7:  Analytics (batch reads)
+  Day 14: ETL (heavy writes)
+  Day 21: OLTP again
+
+Prediction:
+  Pattern: Weekly cycle
+  Next phase: Analytics in 2 days
+
+Action:
+  Prepare: Pre-compute aggregates
+  Adjust: Reduce write optimization, increase read optimization
+```
+
+# Adaptive Reconfiguration
+
+Self-designing systems continuously adapt. The key challenge: how to change configuration without downtime?
+
+## Hot Reconfiguration
+
+Some changes can be made live:
+
+```
+Immediate (no cost):
+  • Buffer pool size
+  • Cache policies
+  • Query optimizer hints
+
+Online (background work):
+  • Index creation/deletion
+  • Compaction strategy
+  • Compression settings
+
+Offline (requires restart/migration):
+  • Storage engine change
+  • Fundamental schema change
+  • Major architectural shift
+```
+
+## Gradual Migration
+
+For major changes, use gradual migration:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  Gradual Storage Engine Migration                │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Phase 1: Dual-write                                             │
+│    Write to: Old engine AND New engine                           │
+│    Read from: Old engine                                         │
+│                                                                  │
+│  Phase 2: Shadow reads                                           │
+│    Write to: Both engines                                        │
+│    Read from: Both, compare results                              │
+│                                                                  │
+│  Phase 3: Cutover                                                │
+│    Write to: Both engines                                        │
+│    Read from: New engine                                         │
+│                                                                  │
+│  Phase 4: Cleanup                                                │
+│    Write to: New engine only                                     │
+│    Read from: New engine                                         │
+│    Decommission: Old engine                                      │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## The Reconfiguration Trade-off
+
+Changing configuration has costs:
+
+```
+Cost of reconfiguration:
+  • CPU/Memory for migration
+  • Temporary performance degradation
+  • Risk of errors during transition
+
+Benefit of reconfiguration:
+  • Better performance after change
+  • Reduced resource usage
+  • Improved latency/throughput
+
+Decision: Reconfigure when benefit > cost
+```
+
+Self-designing systems model this trade-off:
+
+```python
+def should_reconfigure(current_design, new_design, workload):
+    current_perf = evaluate(current_design, workload)
+    expected_perf = evaluate(new_design, workload)
+
+    migration_cost = estimate_migration_cost(current_design, new_design)
+    time_to_benefit = migration_cost / (expected_perf - current_perf)
+
+    # Only reconfigure if we'll benefit within reasonable time
+    return time_to_benefit < ACCEPTABLE_PAYBACK_PERIOD
+```
+
+# Case Study: Self-Optimizing Storage Engine
+
+Let's trace through how a self-designing system might optimize a storage engine.
+
+## Initial Workload
+
+```
+Workload characteristics:
+  • 90% writes, 10% reads (heavy ingestion phase)
+  • Point writes, range reads
+  • 10M ops/day, growing to 100M
+  • 1TB data, growing to 10TB
+  • Latency: P99 < 100ms writes, P99 < 500ms reads
+```
+
+## Initial Design
+
+System selects LSM-tree optimized for writes:
+
+```
+Selected primitives:
+  • Storage: LSM-tree
+  • Compaction: Universal (tiered)
+  • Index: Sparse index + Bloom filters
+  • Compression: LZ4 (fast)
+
+Configuration:
+  • Memtable: 256MB (large for batch efficiency)
+  • L0 files before compaction: 8 (tolerate more)
+  • Bloom bits: 10 per key
+  • Compression: Level 0 only
+```
+
+## Workload Shift Detected
+
+After 3 months, workload changes:
+
+```
+New workload characteristics:
+  • 30% writes, 70% reads (analysis phase)
+  • Point reads becoming dominant
+  • Same data volume
+```
+
+## Automatic Adaptation
+
+```
+System analysis:
+  • Read amplification too high (checking 5 levels)
+  • Bloom filter false positive rate impacting latency
+  • Compaction not aggressive enough
+
+Actions taken:
+  1. Switch to leveled compaction (reduce read amplification)
+  2. Increase Bloom bits to 15 (reduce false positives)
+  3. Add compression to all levels (reduce space)
+  4. Reduce memtable size to 64MB (faster flush, fresher data)
+
+Migration: Background, 48 hours
+Performance after: 60% reduction in P99 read latency
+```
+
+## Continuous Optimization
+
+```
+Ongoing adjustments (hourly):
+  • Cache hot keys detected → populate read cache
+  • Periodic aggregation queries → pre-compute rollups
+  • Night-time batch writes → schedule compaction
+
+Ongoing adjustments (daily):
+  • Workload trending toward more range queries
+  • Considering: Add secondary index on timestamp
+  • Analysis: Cost 10GB, benefit 40% faster range queries
+  • Decision: Deploy index
+```
+
+# Challenges and Open Problems
+
+## Model Accuracy
+
+Self-designing systems rely on performance models. If models are wrong, designs are wrong.
+
+```
+Model prediction: "Configuration A: 10,000 ops/sec"
+Reality: "Configuration A: 5,000 ops/sec"
+
+Causes:
+  • Hardware differences from training environment
+  • Workload characteristics not captured
+  • Interactions between components not modeled
+  • External factors (network, other workloads)
+
+Mitigation:
+  • Online learning (update models from production)
+  • Uncertainty quantification (know when uncertain)
+  • Conservative defaults (fall back when unsure)
+```
+
+## Stability
+
+Continuous adaptation can cause oscillation:
+
+```
+Time 1: "Write-heavy detected" → Optimize for writes
+Time 2: "Read-heavy detected" → Optimize for reads
+Time 3: "Write-heavy detected" → Optimize for writes
+...
+
+Problem: Constant reconfiguration, never stable
+
+Solution: Hysteresis
+  • Only reconfigure when benefit exceeds threshold
+  • Consider long-term trends, not short-term spikes
+  • Dampen rapid oscillation
+```
+
+## Interpretability
+
+DBAs need to understand what the system is doing:
+
+```
+Bad: "System changed 47 parameters overnight"
+
+Good: "System detected 3x increase in range queries.
+       Changed compaction strategy to reduce read amplification.
+       Expected improvement: 40% faster range queries.
+       Rationale: Similar workload on cluster-7 saw 35% improvement."
+```
+
+Self-designing systems need explanation capabilities.
+
+## Safety Boundaries
+
+Some changes are too risky for automation:
+
+```
+Safe for automation:
+  • Index creation/deletion
+  • Cache sizing
+  • Compaction tuning
+
+Requires human approval:
+  • Schema changes
+  • Consistency level changes
+  • Major architectural shifts
+  • Changes affecting durability guarantees
+```
+
+# The Road Ahead
+
+## Near-Term (Available Now)
+
+- Auto-indexing (cloud databases)
+- Parameter tuning (OtterTune)
+- Query plan optimization (adaptive execution)
+- Workload analysis (monitoring tools)
+
+## Medium-Term (Research Prototypes)
+
+- Learned index selection
+- RL-based compaction
+- Workload-adaptive storage engines
+- Cross-component optimization
+
+## Long-Term (Vision)
+
+- Fully self-designing systems (SageDB-style)
+- Workload-specific code generation
+- Hardware-aware automatic optimization
+- Self-healing and self-scaling
+
+# Implications for System Designers
+
+## What Changes
+
+| Traditional | Self-Designing |
+|-------------|----------------|
+| Pick a database, tune it | Define requirements, system adapts |
+| Manual parameter tuning | Automatic optimization |
+| Periodic capacity planning | Continuous adaptation |
+| DBA as operator | DBA as overseer |
+
+## What Stays the Same
+
+Self-designing systems still need:
+
+1. **Clear requirements**: The system optimizes for what you tell it
+2. **Understanding of trade-offs**: Someone must define constraints
+3. **Monitoring and oversight**: Automation needs supervision
+4. **Domain knowledge**: Business context informs design
+
+## The Human-AI Partnership
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              Human-AI Design Partnership                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Human provides:                                                 │
+│    • Business requirements                                       │
+│    • Constraints (budget, latency, durability)                   │
+│    • Safety boundaries                                           │
+│    • High-level architectural decisions                          │
+│    • Approval for major changes                                  │
+│                                                                  │
+│  AI provides:                                                    │
+│    • Design space exploration                                    │
+│    • Performance prediction                                      │
+│    • Continuous optimization                                     │
+│    • Anomaly detection                                           │
+│    • Adaptation to workload changes                              │
+│                                                                  │
+│  Together:                                                       │
+│    • Better designs than either alone                            │
+│    • Faster iteration on optimization                            │
+│    • Continuous improvement                                      │
+│    • Reduced operational burden                                  │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+# Conclusion: The Future of System Design
+
+We've traveled from first principles to the frontier of system design:
+
+1. **Foundations**: The design space problem, primitives, trade-offs
+2. **Primitives**: LSM-trees, B-trees, consensus, caching
+3. **Composition**: How primitives combine into systems
+4. **AI Era**: From AI-assisted to self-designing systems
+
+The key insights:
+
+**There is no "best" design.** Only trade-offs appropriate for your workload.
+
+**Primitives are the vocabulary.** Master them to understand any system.
+
+**Trade-offs compound.** When combining primitives, understand interactions.
+
+**AI augments, not replaces.** Human insight + machine optimization = best results.
+
+**The future is adaptive.** Static designs give way to continuous optimization.
+
+System design remains a deeply human endeavor—understanding requirements, making trade-offs, taking responsibility for outcomes. But the tools we use are becoming more powerful. The designers who thrive will be those who leverage AI as a force multiplier while maintaining deep understanding of the fundamentals.
+
+The periodic table of data structures is expanding. The design space is being mapped. And the systems of tomorrow will help design themselves—guided by the principles we've explored in this book.
+
+---
+
+*Part IV: The AI Era — Complete*
+
+*System Design from First Principles — The End*

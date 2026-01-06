@@ -1,0 +1,537 @@
+---
+title: "AI-Assisted Design Exploration"
+subtitle: "Navigating the Vast Design Space"
+author: "Taras Tsugrii"
+date: today
+bibliography: ../references.bib
+---
+
+# The Design Space Problem Revisited
+
+In Part I, we established that system design involves navigating a vast space of trade-offs. The RUM Conjecture tells us we can't optimize for everything simultaneously. CAP and PACELC force us to choose between consistency and availability. Every decision has a price.
+
+But here's the challenge: **the design space is enormous**.
+
+Consider just the storage engine choices:
+
+- B-tree or LSM-tree?
+- If LSM-tree: leveled or tiered compaction?
+- What memtable size? What level multiplier?
+- Bloom filter: how many bits per key?
+- Compression: which algorithm? Which levels?
+
+Each parameter interacts with others in complex ways. A DBA might spend months tuning a system, and the optimal configuration changes as workloads evolve.
+
+**What if machines could explore this space for us?**
+
+# The Promise of AI in System Design
+
+Machine learning offers three capabilities that are transforming system design:
+
+1. **Pattern recognition**: Learn what configurations work for which workloads
+2. **Prediction**: Forecast performance before deploying changes
+3. **Optimization**: Search efficiently through high-dimensional parameter spaces
+
+This isn't replacing human designers—it's augmenting them. AI can explore more configurations, faster, and identify patterns humans might miss.
+
+# Learned Indexes: The First Revolution
+
+The seminal 2018 paper "The Case for Learned Index Structures" by Tim Kraska et al. started a paradigm shift. The insight was deceptively simple:
+
+**A B-tree is a model that maps keys to positions. What if we used a better model?**
+
+## How B-trees Work (From the AI Perspective)
+
+A B-tree answers the question: "Given key K, where is the record located?"
+
+```
+Query: key = 42
+
+B-tree approach:
+  ┌─────────────────┐
+  │   Root Node     │  → Check 42 > 30, go right
+  └────────┬────────┘
+           │
+  ┌────────▼────────┐
+  │  Internal Node  │  → Check 42 < 50, go left
+  └────────┬────────┘
+           │
+  ┌────────▼────────┐
+  │   Leaf Node     │  → Scan: found at position 847
+  └─────────────────┘
+
+  Result: 3 node accesses → record at position 847
+```
+
+Each node access is a "prediction" that narrows down the search space. The B-tree is optimized for the **worst case**—it makes no assumptions about data distribution.
+
+## How Learned Indexes Work
+
+A learned index replaces the tree with a neural network that learns the **cumulative distribution function (CDF)** of keys:
+
+```
+Query: key = 42
+
+Learned index approach:
+  ┌─────────────────┐
+  │  Neural Network │  → Input: 42
+  │  (learned CDF)  │  → Output: position ≈ 845
+  └─────────────────┘
+           │
+  ┌────────▼────────┐
+  │  Binary Search  │  → Search range [840, 850]
+  │  (error bound)  │  → Found at position 847
+  └─────────────────┘
+
+  Result: 1 model inference + small local search
+```
+
+The model learns patterns like: "Keys between 40-50 are stored around positions 800-900." It exploits **data distribution** instead of assuming worst-case.
+
+## The Results
+
+On real-world datasets:
+
+| Metric | B-tree | Learned Index | Improvement |
+|--------|--------|---------------|-------------|
+| Lookup latency | 1.0x | 0.3x | 70% faster |
+| Memory usage | 1.0x | 0.1x | 10x smaller |
+
+The neural network is smaller than the B-tree nodes and makes better predictions for well-distributed data.
+
+## Trade-offs
+
+Learned indexes aren't universally better:
+
+| Strength | Weakness |
+|----------|----------|
+| Faster average-case | Slower worst-case |
+| Less memory | Requires training time |
+| Exploits patterns | Needs retraining on updates |
+| Great for read-heavy | Complex for frequent inserts |
+
+This is why modern systems use **hybrid approaches**: learned models as the first stage, B-trees as a fallback.
+
+# Learned Bloom Filters
+
+The same principle applies to Bloom filters. Traditional Bloom filters have a fixed false positive rate determined by size and hash functions.
+
+A **learned Bloom filter** trains a model to recognize actual keys:
+
+```
+Traditional Bloom filter:
+  "Is key K in the set?" → Hash functions → Maybe/No
+
+Learned Bloom filter:
+  "Is key K in the set?" → ML model → Confidence score
+                               │
+                               ▼
+                        If uncertain → Fallback to traditional
+```
+
+The model learns patterns in actual keys and can achieve lower false positive rates for the same memory budget—or the same rate with less memory.
+
+## Practical Results
+
+In LSM-tree systems, learned Bloom filters can reduce:
+
+- **False positive rate** by 50% (same memory)
+- **Memory usage** by 40% (same false positive rate)
+
+The trade-off: training time and adaptation to workload changes.
+
+# Auto-Tuning: Optimizing Configuration
+
+Beyond replacing individual structures, AI can optimize the entire configuration space.
+
+## The Configuration Problem
+
+A modern database has hundreds of tunable parameters:
+
+```
+# RocksDB has 100+ options
+write_buffer_size = 64MB      # How big should memtable be?
+max_write_buffer_number = 3   # How many memtables before flush?
+level0_file_num_compaction_trigger = 4  # When to compact?
+max_bytes_for_level_base = 256MB        # L1 size?
+max_bytes_for_level_multiplier = 10     # Level ratio?
+bloom_bits_per_key = 10       # Bloom filter size?
+block_size = 4096             # SSTable block size?
+compression_type = snappy     # Which compression?
+# ... 90+ more parameters
+```
+
+These parameters interact in non-obvious ways. Increasing `write_buffer_size` reduces write amplification but increases memory usage and recovery time. The optimal setting depends on workload, hardware, and other parameters.
+
+## OtterTune: Learning from History
+
+OtterTune, developed at Carnegie Mellon, uses machine learning to recommend configurations:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        OtterTune                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  1. Collect metrics from running database                        │
+│     (throughput, latency, resource usage)                        │
+│                                                                  │
+│  2. Compare to repository of historical workloads                │
+│     (which workloads looked similar?)                            │
+│                                                                  │
+│  3. Use Gaussian Process to model performance                    │
+│     (predict: if we change X, what happens to latency?)          │
+│                                                                  │
+│  4. Recommend configuration changes                              │
+│     (increase buffer pool by 20%, reduce checkpoint interval)    │
+│                                                                  │
+│  5. Measure results, update model                                │
+│     (did prediction match reality?)                              │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+Key techniques:
+
+- **Workload characterization**: Identify which dimensions of workload matter
+- **Transfer learning**: Apply knowledge from similar workloads
+- **Gaussian Process regression**: Model performance as a function of configuration
+- **Bayesian optimization**: Efficiently search high-dimensional parameter space
+
+## Results
+
+OtterTune can achieve:
+
+- **Comparable or better performance** than expert DBAs
+- **Automatic adaptation** to workload changes
+- **90%+ reduction** in tuning effort
+
+The system learns not just what configurations work, but *why* they work for certain workloads.
+
+# Query Optimization with ML
+
+Traditional query optimizers rely on:
+
+1. **Cardinality estimation**: How many rows will this operation produce?
+2. **Cost modeling**: How expensive is each operation?
+3. **Plan enumeration**: Which execution plan is best?
+
+Each component has known weaknesses. AI is improving all three.
+
+## Learned Cardinality Estimation
+
+Traditional cardinality estimation uses histograms and assumes independence between columns. This assumption is often wrong:
+
+```sql
+SELECT * FROM users
+WHERE city = 'San Francisco'
+  AND job = 'Software Engineer'
+```
+
+Traditional: Assume city and job are independent
+  → P(SF) × P(SWE) = 0.01 × 0.05 = 0.0005
+
+Reality: SF has many software engineers
+  → Actual selectivity = 0.01 (20x underestimate!)
+```
+
+This leads to catastrophically bad query plans.
+
+**Learned estimators** train neural networks on actual query results:
+
+```
+┌─────────────────────────────────────────────────┐
+│        Learned Cardinality Estimation            │
+├─────────────────────────────────────────────────┤
+│                                                  │
+│  Input: Query predicates                         │
+│         (city='SF', job='SWE', ...)              │
+│                                                  │
+│  Neural Network learns:                          │
+│    - Column correlations from data               │
+│    - Multi-column joint distributions            │
+│    - Patterns in actual query results            │
+│                                                  │
+│  Output: Estimated cardinality (with confidence) │
+│                                                  │
+└─────────────────────────────────────────────────┘
+```
+
+Results show 10-100x improvement in estimation accuracy for complex queries with correlated predicates.
+
+## Learned Cost Models
+
+Traditional cost models use hand-tuned formulas:
+
+```
+Cost(SeqScan) = pages × seq_page_cost
+Cost(IndexScan) = tuples × cpu_index_tuple_cost + pages × random_page_cost
+```
+
+These formulas don't capture:
+- Actual hardware characteristics
+- Cache effects
+- Concurrent query interference
+
+**Learned cost models** train on actual execution times:
+
+```
+┌─────────────────────────────────────────────────┐
+│           Learned Cost Model                     │
+├─────────────────────────────────────────────────┤
+│                                                  │
+│  Training data:                                  │
+│    (query plan, actual execution time)           │
+│                                                  │
+│  Model learns:                                   │
+│    - Hardware-specific performance               │
+│    - Interaction effects between operators       │
+│    - Data-dependent costs                        │
+│                                                  │
+│  Prediction:                                     │
+│    Input: Query execution plan                   │
+│    Output: Expected execution time               │
+│                                                  │
+└─────────────────────────────────────────────────┘
+```
+
+## Plan Selection with Graph Neural Networks
+
+Query plans have a natural graph structure. Graph Neural Networks (GNNs) can learn to evaluate plans:
+
+```
+     Hash Join                    Plan as Graph:
+    /         \
+  Scan       Index Scan            ┌────┐
+  users      orders                │Join├──────┐
+                                   └─┬──┘      │
+                                     │      ┌──▼──┐
+                                  ┌──▼──┐   │Order│
+                                  │Users│   │Scan │
+                                  │Scan │   └─────┘
+                                  └─────┘
+
+    GNN learns: This plan shape + these table stats → Good/Bad?
+```
+
+GNNs can learn complex patterns like: "Hash joins are better when the build side is small, but this changes when memory is constrained."
+
+# Workload Prediction
+
+Why wait for workload changes when you can predict them?
+
+## LSTM for Query Forecasting
+
+Long Short-Term Memory networks can learn temporal patterns in query workloads:
+
+```
+Historical query pattern:
+  Hour 1-8:   100 QPS, 80% reads
+  Hour 8-12:  500 QPS, 60% reads
+  Hour 12-14: 200 QPS, 40% reads (lunch: batch jobs)
+  Hour 14-18: 600 QPS, 70% reads
+  Hour 18-24: 50 QPS, 90% reads
+
+LSTM learns: Daily cycle with predictable patterns
+  → At 7:55 AM: Prepare for traffic spike
+  → At 11:55 AM: Prepare for write-heavy batch
+```
+
+This enables **proactive optimization**:
+
+- Pre-warm caches before expected queries
+- Scale up resources before traffic spikes
+- Schedule maintenance during predicted quiet periods
+- Adjust compaction strategies for upcoming workload
+
+## Anomaly Detection
+
+ML can also identify abnormal patterns:
+
+```
+Normal: 100-500 QPS with gradual changes
+
+Anomaly detected:
+  - Sudden spike from 200 to 5000 QPS
+  - Unusual query pattern (new table being scanned)
+  - Possible causes: attack, runaway process, new deployment
+
+Automated response:
+  - Alert operators
+  - Rate limit suspicious queries
+  - Scale resources (if legitimate traffic)
+```
+
+# Compaction Strategies with Reinforcement Learning
+
+LSM-tree compaction is a classic optimization problem: when should we compact, and which files should we merge?
+
+Traditional approaches use heuristics (size ratios, trigger thresholds). Reinforcement Learning can learn better policies:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│           RL-Based Compaction Strategy                       │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  State: Current LSM structure                                │
+│    - Files per level                                         │
+│    - File sizes and overlap                                  │
+│    - Recent read/write patterns                              │
+│    - System resources (CPU, I/O)                             │
+│                                                              │
+│  Actions: Compaction decisions                               │
+│    - Which level to compact                                  │
+│    - Which files to include                                  │
+│    - When to trigger                                         │
+│                                                              │
+│  Reward: Performance metrics                                 │
+│    - Read latency                                            │
+│    - Write throughput                                        │
+│    - Space amplification                                     │
+│                                                              │
+│  Learning: Adjust policy to maximize long-term reward        │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+The RL agent learns workload-specific strategies:
+
+- "Write bursts incoming → delay compaction, prioritize ingestion"
+- "Read-heavy period → aggressive compaction to reduce read amplification"
+- "Low-priority background queries → compact during gaps"
+
+# The Self-Tuning Stack
+
+Putting it all together, here's how AI can assist across the entire system:
+
+```
+┌───────────────────────────────────────────────────────────────────┐
+│                  AI-Assisted System Design                         │
+├───────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  Query Layer:                                                      │
+│    • Learned cardinality estimation                                │
+│    • Learned cost models                                           │
+│    • GNN-based plan selection                                      │
+│                                                                    │
+│  Caching Layer:                                                    │
+│    • ML-based eviction policies                                    │
+│    • Predictive prefetching                                        │
+│    • Workload-adaptive cache sizing                                │
+│                                                                    │
+│  Storage Engine:                                                   │
+│    • Learned indexes                                               │
+│    • Learned Bloom filters                                         │
+│    • RL-based compaction                                           │
+│                                                                    │
+│  Configuration:                                                    │
+│    • Auto-tuning (OtterTune-style)                                 │
+│    • Workload prediction                                           │
+│    • Anomaly detection                                             │
+│                                                                    │
+│  Capacity Planning:                                                │
+│    • Workload forecasting                                          │
+│    • Proactive scaling                                             │
+│    • Resource optimization                                         │
+│                                                                    │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+# Practical Considerations
+
+## When to Use AI-Assisted Design
+
+| Scenario | AI Value | Reason |
+|----------|----------|--------|
+| High-volume production | High | Optimization gains compound |
+| Stable, predictable workload | Medium | Patterns are learnable |
+| Rapidly changing workload | High | Continuous adaptation needed |
+| Low-volume systems | Low | Manual tuning sufficient |
+| Strict latency SLAs | Medium | Predictions must be reliable |
+
+## Challenges and Limitations
+
+**Training time**: Models need data to learn. Cold-start can be problematic.
+
+**Concept drift**: Workloads change. Models need continuous updating.
+
+**Interpretability**: Why did the model make this recommendation? Hard to debug.
+
+**Reliability**: What if the model is wrong? Need fallback mechanisms.
+
+**Resource overhead**: ML models consume CPU/memory. Worth the trade-off?
+
+## Hybrid Approaches
+
+Most production systems use hybrid designs:
+
+```
+┌─────────────────────────────────────────────────┐
+│              Hybrid Strategy                     │
+├─────────────────────────────────────────────────┤
+│                                                  │
+│  1. Use traditional methods as baseline          │
+│     (B-trees, rule-based tuning)                 │
+│                                                  │
+│  2. Layer ML for optimization                    │
+│     (learned indexes as hint, not replacement)   │
+│                                                  │
+│  3. Fallback on uncertainty                      │
+│     (if model confidence low → use default)      │
+│                                                  │
+│  4. Human oversight for critical decisions       │
+│     (ML recommends, human approves)              │
+│                                                  │
+└─────────────────────────────────────────────────┘
+```
+
+This provides the benefits of AI assistance while maintaining reliability.
+
+# Tools and Systems
+
+## Production-Ready
+
+| System | Focus | Status |
+|--------|-------|--------|
+| OtterTune | Auto-configuration | Commercial |
+| AWS Aurora ML | Query optimization | Production |
+| Azure Automatic Tuning | Index recommendations | Production |
+
+## Research Prototypes
+
+| System | Focus | Institution |
+|--------|-------|-------------|
+| SageDB | Self-designing storage | MIT |
+| NoisePage | Autonomous DBMS | CMU |
+| NeurDB | AI-powered data system | Industry |
+
+## Techniques You Can Use Today
+
+1. **Learned indexes**: Libraries like ALEX, LIPP available
+2. **Workload analysis**: pg_stat_statements + ML in your analytics pipeline
+3. **Configuration tuning**: OtterTune, PGTune with ML extensions
+4. **Cardinality hints**: PostgreSQL supports cardinality hints you can derive from ML models
+
+# Conclusion
+
+AI doesn't replace system design thinking—it amplifies it.
+
+The fundamentals remain:
+- Understand your requirements
+- Know the trade-offs
+- Design for your workload
+
+AI helps with:
+- Exploring more configurations faster
+- Finding non-obvious optimizations
+- Adapting to changing conditions
+- Reducing manual tuning burden
+
+The best designs combine **human insight** (understanding requirements, making architectural decisions) with **machine optimization** (parameter tuning, workload adaptation, pattern recognition).
+
+In the next chapter, we'll look at the ultimate extension of this idea: systems that design themselves.
+
+---
+
+*Part IV: The AI Era — Chapter 1*
+
+*Next: Self-Designing Systems*
