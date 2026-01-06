@@ -1,0 +1,583 @@
+---
+title: "Case Study: Distributed Message Queue"
+subtitle: "Decoupling at Scale"
+author: "Taras Tsugrii"
+date: today
+bibliography: ../references.bib
+---
+
+# The Problem
+
+Build a distributed message queue. The backbone of asynchronous systems.
+
+**Core abstraction**:
+```
+Producer → Queue → Consumer
+```
+
+Producers publish messages. Consumers process them. The queue decouples them in time, space, and pace.
+
+This simple abstraction enables:
+- **Load leveling**: Absorb traffic spikes
+- **Fault isolation**: Producer keeps working if consumer crashes
+- **Parallel processing**: Multiple consumers share work
+- **Replay**: Re-process historical messages
+
+# Requirements
+
+## Functional Requirements
+- Producers publish messages to topics
+- Consumers subscribe and receive messages
+- Messages persist until consumed (or expire)
+- Support for consumer groups (parallel processing)
+
+## Non-Functional Requirements
+
+| Requirement | Target |
+|-------------|--------|
+| Throughput | 1 million messages/second |
+| Latency (P99) | <20ms end-to-end |
+| Durability | No data loss with 1 node failure |
+| Ordering | Per-partition ordering |
+| Retention | 7 days default |
+
+## Delivery Semantics
+
+Three options:
+
+| Semantic | Description | Use Case |
+|----------|-------------|----------|
+| **At-most-once** | Fire and forget, may lose messages | Metrics, logs |
+| **At-least-once** | Guaranteed delivery, may duplicate | Most applications |
+| **Exactly-once** | No loss, no duplicates | Financial transactions |
+
+We'll target **at-least-once** with exactly-once as an option.
+
+# Architecture
+
+## The Log as Foundation
+
+A message queue is fundamentally an **append-only log**:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Append-Only Log                         │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Offset: 0     1     2     3     4     5     6     7        │
+│         ┌───┐ ┌───┐ ┌───┐ ┌───┐ ┌───┐ ┌───┐ ┌───┐ ┌───┐    │
+│         │ A │ │ B │ │ C │ │ D │ │ E │ │ F │ │ G │ │ H │    │
+│         └───┘ └───┘ └───┘ └───┘ └───┘ └───┘ └───┘ └───┘    │
+│                               ▲                 ▲           │
+│                               │                 │           │
+│                        Consumer 1         Producer          │
+│                        (offset: 4)        (append)          │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Why append-only works**:
+- Sequential writes: 100-1000× faster than random
+- Simple crash recovery: Truncate incomplete tail
+- Natural ordering: Offset = position = order
+- Efficient replication: Ship log tail
+
+## High-Level Design
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Distributed Message Queue                 │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│   ┌─────────────────────────────────────────────────────┐   │
+│   │                    Producers                        │   │
+│   │         Batch | Compress | Route by key             │   │
+│   └───────────────────────────┬─────────────────────────┘   │
+│                               │                             │
+│   ┌───────────────────────────▼─────────────────────────┐   │
+│   │                   Topic: "orders"                   │   │
+│   │   ┌───────────┐  ┌───────────┐  ┌───────────┐      │   │
+│   │   │Partition 0│  │Partition 1│  │Partition 2│      │   │
+│   │   │ (Leader)  │  │ (Leader)  │  │ (Leader)  │      │   │
+│   │   │ Replica   │  │ Replica   │  │ Replica   │      │   │
+│   │   │ Replica   │  │ Replica   │  │ Replica   │      │   │
+│   │   └───────────┘  └───────────┘  └───────────┘      │   │
+│   └─────────────────────────────────────────────────────┘   │
+│                               │                             │
+│   ┌───────────────────────────▼─────────────────────────┐   │
+│   │                  Consumer Group                     │   │
+│   │    Consumer A    Consumer B    Consumer C           │   │
+│   │    (P0)          (P1)          (P2)                │   │
+│   └─────────────────────────────────────────────────────┘   │
+│                                                             │
+│   Metadata: Partition assignments, offsets, cluster state   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Partitioning for Scale
+
+A single log limits throughput. Partition the topic:
+
+```
+Topic: "orders"
+├── Partition 0: [msg0, msg3, msg6, msg9, ...]
+├── Partition 1: [msg1, msg4, msg7, msg10, ...]
+└── Partition 2: [msg2, msg5, msg8, msg11, ...]
+```
+
+**Routing strategy**:
+```python
+partition = hash(message.key) % num_partitions
+```
+
+- Same key → same partition → ordering preserved
+- No key → round-robin → maximum parallelism
+
+**Partition count trade-offs**:
+
+| Partitions | Parallelism | Overhead |
+|------------|-------------|----------|
+| 1 | None | Lowest |
+| 10 | 10× consumers | Low |
+| 100 | 100× consumers | Moderate |
+| 1000 | 1000× consumers | High (file handles, memory) |
+
+**Rule of thumb**: Partitions = 2-3× expected peak consumer count.
+
+## Replication for Durability
+
+Each partition replicated across brokers:
+
+```
+Partition 0:
+┌──────────────────────────────────────────────────────────┐
+│  Broker 1 (Leader)   Broker 2 (Follower)   Broker 3 (Follower)
+│  ┌─────────────┐     ┌─────────────┐       ┌─────────────┐
+│  │ A B C D E F │     │ A B C D E   │       │ A B C D E F │
+│  │    (ISR)    │     │   (lagging) │       │    (ISR)    │
+│  └─────────────┘     └─────────────┘       └─────────────┘
+│        ▲                                         ▲
+│        │                                         │
+│     Writes                                    In-Sync
+│   (all here)                                  Replica
+└──────────────────────────────────────────────────────────┘
+```
+
+**ISR (In-Sync Replicas)**: Replicas fully caught up with leader.
+
+**Producer acknowledgment levels**:
+
+| acks | Behavior | Durability | Latency |
+|------|----------|------------|---------|
+| 0 | Don't wait | None | ~1ms |
+| 1 | Wait for leader | Medium | ~5ms |
+| all | Wait for all ISR | High | ~10ms |
+
+**Configuration**: `replication.factor=3, min.insync.replicas=2`
+- Tolerates 1 replica failure
+- Writes succeed if 2+ replicas available
+
+# Write Path
+
+```
+Producer sends message
+    │
+    ▼
+1. Route to partition (hash(key) or round-robin)
+    │
+    ▼
+2. Send to partition leader
+    │
+    ▼
+3. Leader appends to local log
+    │
+    ▼
+4. Followers replicate (async pull)
+    │
+    ▼
+5. Leader waits for acks (based on acks setting)
+    │
+    ▼
+6. Return success to producer
+```
+
+## Batching and Compression
+
+**Batching**: Accumulate messages before sending.
+
+```
+Without batching:
+  Message 1 → fsync → ack
+  Message 2 → fsync → ack
+  Message 3 → fsync → ack
+  Total: 3 fsyncs, 3 acks, ~50ms
+
+With batching (linger.ms=10):
+  Messages 1,2,3 (accumulate 10ms) → fsync → ack
+  Total: 1 fsync, 1 ack, ~15ms
+```
+
+**Compression** (applied to batch):
+
+| Algorithm | Ratio | CPU | Use Case |
+|-----------|-------|-----|----------|
+| None | 1× | None | Low-latency |
+| LZ4 | 2-3× | Low | Balanced |
+| Snappy | 2-3× | Low | Balanced |
+| Zstd | 3-5× | Medium | Throughput |
+| Gzip | 4-6× | High | Cold storage |
+
+**Performance impact**: Batching + compression can improve throughput **10-100×**.
+
+# Read Path
+
+## Pull-Based Consumption
+
+Consumers pull messages at their own pace:
+
+```
+Consumer polls
+    │
+    ▼
+1. Send fetch request with offset
+    │
+    ▼
+2. Broker reads from log starting at offset
+    │
+    ▼
+3. Return batch of messages
+    │
+    ▼
+4. Consumer processes messages
+    │
+    ▼
+5. Consumer commits new offset
+```
+
+**Why pull?**
+- Consumer controls rate (backpressure)
+- Supports batch processing
+- Simpler broker (no tracking delivery state)
+
+## Consumer Groups
+
+Multiple consumers share partition consumption:
+
+```
+Topic with 6 partitions:
+┌────┬────┬────┬────┬────┬────┐
+│ P0 │ P1 │ P2 │ P3 │ P4 │ P5 │
+└────┴────┴────┴────┴────┴────┘
+
+Consumer Group A (3 consumers):
+  Consumer 1: P0, P1
+  Consumer 2: P2, P3
+  Consumer 3: P4, P5
+
+Consumer Group B (2 consumers):
+  Consumer 1: P0, P1, P2
+  Consumer 2: P3, P4, P5
+```
+
+**Rules**:
+- Each partition → exactly one consumer in group
+- Each consumer → zero or more partitions
+- Multiple groups → independent consumption
+
+**Rebalancing**: When consumer joins/leaves:
+1. Group coordinator notified
+2. All consumers stop processing
+3. Partitions reassigned
+4. Consumers resume
+
+**Problem**: Stop-the-world during rebalance.
+
+**Solution**: Cooperative rebalancing (only affected partitions transfer).
+
+## Offset Management
+
+Consumers track position via **offsets**:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Offset Tracking                                            │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Log:     [0] [1] [2] [3] [4] [5] [6] [7] [8] [9]          │
+│                           ▲                     ▲           │
+│                           │                     │           │
+│                   Committed offset        Current read      │
+│                        (durable)           (in-memory)      │
+│                                                             │
+│  On crash: Resume from committed offset (may reprocess 4-8) │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Commit strategies**:
+
+| Strategy | Behavior | Semantic |
+|----------|----------|----------|
+| Auto-commit | Periodic (5s) | At-least-once (may reprocess) |
+| Commit before | Commit, then process | At-most-once (may lose) |
+| Commit after | Process, then commit | At-least-once (may duplicate) |
+| Transactional | Atomic with processing | Exactly-once |
+
+# Exactly-Once Semantics
+
+The hardest problem in messaging.
+
+## The Duplicate Problem
+
+```
+1. Consumer reads message at offset 100
+2. Consumer processes message
+3. Consumer crashes before committing offset
+4. Consumer restarts, re-reads offset 100
+5. Message processed twice!
+```
+
+## Solutions
+
+### Idempotent Producer
+
+Broker deduplicates retries:
+
+```
+Producer assigns: (producer_id, sequence_number)
+Broker tracks: Last sequence per producer
+Duplicate detection: Same sequence = skip
+```
+
+**Scope**: Single partition, single producer session.
+
+### Transactional Writes
+
+Atomic writes across partitions:
+
+```java
+producer.beginTransaction();
+producer.send(topic1, msg1);
+producer.send(topic2, msg2);
+producer.sendOffsetsToTransaction(offsets, groupId);
+producer.commitTransaction();
+```
+
+**All or nothing**: Either all writes succeed or none.
+
+### End-to-End Exactly-Once
+
+Read → Process → Write atomically:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Exactly-Once Pattern                                       │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  1. Begin transaction                                       │
+│  2. Read input messages                                     │
+│  3. Process                                                 │
+│  4. Write output messages  ──┐                              │
+│  5. Commit offsets         ──┼── Atomic                     │
+│  6. Commit transaction     ──┘                              │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Cost**: 3-5× latency increase. Use only when needed.
+
+**Alternative**: Idempotent consumer (simpler, application-level).
+
+# Storage Design
+
+## Segment-Based Log
+
+Partition log divided into segments:
+
+```
+Partition 0:
+├── 00000000000000000000.log    (segment 0: offsets 0-999)
+├── 00000000000000000000.index
+├── 00000000000000001000.log    (segment 1: offsets 1000-1999)
+├── 00000000000000001000.index
+├── 00000000000000002000.log    (segment 2: active, offsets 2000+)
+└── 00000000000000002000.index
+```
+
+**Segment rotation** when:
+- Size exceeds limit (1 GB default)
+- Time exceeds limit (7 days default)
+
+**Benefits**:
+- Efficient deletion (drop entire segment file)
+- Parallel reads (different consumers, different segments)
+- Compaction per segment
+
+## Index Structure
+
+Sparse index for offset → file position:
+
+```
+Index file (sparse, every 4KB):
+┌─────────────────────────────────────┐
+│ Offset 0    → Position 0            │
+│ Offset 100  → Position 4096         │
+│ Offset 200  → Position 8192         │
+│ ...                                 │
+└─────────────────────────────────────┘
+
+Lookup offset 150:
+1. Binary search: 100 < 150 < 200
+2. Seek to position 4096
+3. Sequential scan to offset 150
+```
+
+**Trade-off**: Sparse index (small) vs. dense index (fast but large).
+
+## Retention Policies
+
+```
+# Time-based
+retention.ms=604800000    # 7 days
+
+# Size-based
+retention.bytes=1073741824  # 1 GB per partition
+
+# Compacted (keep latest per key)
+cleanup.policy=compact
+```
+
+**Compaction** for changelog use cases:
+
+```
+Before: [k1:v1] [k2:v2] [k1:v3] [k2:v4] [k1:v5]
+After:  [k2:v4] [k1:v5]   ← Only latest values
+```
+
+# Real Systems Comparison
+
+## Kafka
+
+| Aspect | Details |
+|--------|---------|
+| **Model** | Log-based, partitioned |
+| **Storage** | Append-only segments |
+| **Ordering** | Per-partition |
+| **Throughput** | 1-5M msgs/sec per broker |
+| **Latency** | 5-20ms (with acks=all) |
+| **Exactly-once** | Transactional API |
+
+**Best for**: High-throughput streaming, event sourcing, log aggregation.
+
+## RabbitMQ
+
+| Aspect | Details |
+|--------|---------|
+| **Model** | Exchange → Queue routing |
+| **Storage** | Message store (not log) |
+| **Ordering** | Per-queue FIFO |
+| **Throughput** | 10-100K msgs/sec |
+| **Latency** | 1-10ms |
+| **Features** | Rich routing, RPC support |
+
+**Best for**: Complex routing, work queues, RPC patterns.
+
+## AWS SQS
+
+| Aspect | Details |
+|--------|---------|
+| **Model** | Managed queue service |
+| **Types** | Standard (no order) / FIFO |
+| **Throughput** | 3K-70K msgs/sec |
+| **Latency** | 10-50ms |
+| **Exactly-once** | FIFO deduplication |
+
+**Best for**: Serverless, AWS-native, zero ops.
+
+## Comparison Matrix
+
+| System | Throughput | Latency | Ordering | Replay | Ops |
+|--------|------------|---------|----------|--------|-----|
+| Kafka | Very High | Medium | Partition | Yes | High |
+| RabbitMQ | Medium | Low | Queue | Limited | Medium |
+| SQS Standard | Medium | Medium | None | No | None |
+| SQS FIFO | Low | Medium | Group | No | None |
+
+# Production Architecture
+
+## Final Design
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Distributed Message Queue                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   ┌─────────────────────────────────────────────────────────────────┐   │
+│   │                      Load Balancer                              │   │
+│   │            (producer connections, round-robin)                  │   │
+│   └───────────────────────────────┬─────────────────────────────────┘   │
+│                                   │                                     │
+│   ┌─────────────┬─────────────────┼─────────────────┬───────────────┐   │
+│   │             │                 │                 │               │   │
+│   ▼             ▼                 ▼                 ▼               │   │
+│ ┌─────────┐ ┌─────────┐     ┌─────────┐     ┌─────────┐            │   │
+│ │Broker 0 │ │Broker 1 │     │Broker 2 │     │Broker N │  ...       │   │
+│ ├─────────┤ ├─────────┤     ├─────────┤     ├─────────┤            │   │
+│ │ P0-Lead │ │ P1-Lead │     │ P2-Lead │     │ P3-Lead │            │   │
+│ │ P1-Repl │ │ P2-Repl │     │ P0-Repl │     │ P1-Repl │            │   │
+│ │ P3-Repl │ │ P0-Repl │     │ P3-Repl │     │ P2-Repl │            │   │
+│ └────┬────┘ └────┬────┘     └────┬────┘     └────┬────┘            │   │
+│      │           │               │               │                 │   │
+│ ┌────▼───────────▼───────────────▼───────────────▼────┐            │   │
+│ │              Segment-Based Storage                   │            │   │
+│ │  Append-only logs | Indexes | Compaction            │            │   │
+│ └─────────────────────────────────────────────────────┘            │   │
+│                                                                     │   │
+│   ┌─────────────────────────────────────────────────────────────┐   │   │
+│   │              Metadata / Coordination                        │   │   │
+│   │    Controller election | Partition assignment | Offsets     │   │   │
+│   │    (ZooKeeper / KRaft / etcd)                               │   │   │
+│   └─────────────────────────────────────────────────────────────┘   │   │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Performance Summary
+
+| Metric | Target | Achievable |
+|--------|--------|------------|
+| Throughput | 1M msgs/sec | 1-5M msgs/sec |
+| Latency (P99) | <20ms | 5-20ms |
+| Durability | Survive 1 failure | RF=3, min.isr=2 |
+| Ordering | Per-partition | Guaranteed |
+| Retention | 7 days | Configurable |
+
+## Key Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Storage | Append-only log | Sequential I/O, simple recovery |
+| Parallelism | Partitioning | Horizontal scale |
+| Durability | ISR replication | Strong consistency |
+| Consumption | Pull-based | Consumer backpressure |
+| Ordering | Per-partition | Balance order + parallelism |
+
+# Conclusion
+
+A distributed message queue combines familiar primitives:
+
+1. **Append-only log**: Core storage abstraction
+2. **Partitioning**: Horizontal throughput scaling
+3. **Replication**: Durability across failures
+4. **Consumer groups**: Parallel processing
+
+The key trade-offs:
+- **Ordering vs. parallelism**: More partitions = more parallelism, weaker cross-partition ordering
+- **Durability vs. latency**: More replicas + sync acks = higher latency
+- **Exactly-once vs. simplicity**: Transactional semantics add complexity
+
+Understanding these trade-offs lets you choose the right system—and configure it correctly—for your workload.
+
+---
+
+*Part III: Composition — Complete*
+
+*Next: Part IV — The AI Era (Future)*
