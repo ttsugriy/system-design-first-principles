@@ -1,0 +1,535 @@
+---
+title: "Consensus Protocols"
+subtitle: "Agreement in the Face of Failure"
+author: "Taras Tsugrii"
+date: today
+bibliography: ../references.bib
+---
+
+# Introduction: Why Consensus Matters
+
+Distributed systems face a fundamental problem: how do multiple nodes agree on something when messages can be delayed, duplicated, lost, or when nodes can crash?
+
+**Consensus** is the answer—a family of protocols that allow a group of nodes to agree on a single value (or sequence of values) despite failures. Consensus powers:
+
+- **Leader election**: Who's in charge?
+- **State machine replication**: Execute operations in the same order everywhere
+- **Configuration management**: Agree on cluster membership
+- **Distributed locking**: Coordinate access to shared resources
+
+Without consensus, distributed databases couldn't exist. Every system from PostgreSQL replication to Kubernetes etcd to Google Spanner depends on some form of consensus.
+
+# The Impossibility Result: FLP
+
+Before diving into solutions, we must understand a fundamental limit.
+
+The **Fischer-Lynch-Paterson (FLP) impossibility theorem** (1985) proves:
+
+> In an asynchronous distributed system, it is impossible to guarantee consensus in bounded time if even a single process can crash.
+
+This isn't a claim that consensus is hard—it's a mathematical proof that deterministic, always-terminating consensus is **impossible** in purely asynchronous networks.
+
+**Why systems work anyway**:
+
+1. Real networks are **partially synchronous**—messages are usually delivered within bounds
+2. Protocols prioritize **safety over liveness**—better to block than be wrong
+3. **Timeouts and randomization** break the impossibility conditions
+
+The trade-off: consensus protocols may block during network issues (lose liveness) but never return incorrect results (preserve safety).
+
+# Failure Models
+
+How nodes fail determines how many you need and what guarantees you get.
+
+## Crash Failures (Fail-Stop)
+
+Nodes either work correctly or stop completely. A crashed node doesn't send incorrect messages—it just stops.
+
+**Fault tolerance**: For `f` crash failures, need `2f + 1` nodes.
+
+| Cluster Size | Quorum | Tolerated Failures |
+|--------------|--------|-------------------|
+| 3 | 2 | 1 |
+| 5 | 3 | 2 |
+| 7 | 4 | 3 |
+
+This is the model for Paxos, Raft, and ZAB—the protocols used in most production systems.
+
+## Byzantine Failures
+
+Nodes can behave arbitrarily: send incorrect messages, lie, collude. Think malicious actors or corrupted software.
+
+**Fault tolerance**: For `f` Byzantine failures, need `3f + 1` nodes.
+
+| Crash (2f+1) | Byzantine (3f+1) | Failures Tolerated |
+|--------------|-----------------|-------------------|
+| 3 nodes | 4 nodes | 1 |
+| 5 nodes | 7 nodes | 2 |
+| 7 nodes | 10 nodes | 3 |
+
+Byzantine fault tolerance (BFT) is more expensive—more nodes, more messages (O(n²) vs O(n)). It's used in blockchains and multi-organization systems where you can't trust all participants.
+
+For datacenter systems with trusted nodes, crash failure tolerance is sufficient and far more efficient.
+
+# Paxos: The Original
+
+Leslie Lamport's Paxos (1989/1998) was the first practical consensus protocol. It's notoriously difficult to understand—Lamport himself admitted the paper was "Greek" to most readers.
+
+## Roles
+
+- **Proposers**: Suggest values to be agreed upon
+- **Acceptors**: Vote on proposals (odd number: 3, 5, 7)
+- **Learners**: Learn the chosen value
+
+A single node can play multiple roles.
+
+## Basic Paxos: Two Phases
+
+**Phase 1: Prepare**
+
+```
+Proposer                           Acceptors
+    │                                  │
+    ├──── PREPARE(n) ─────────────────►│
+    │     "I want to propose #n"       │
+    │                                  │
+    │◄─── PROMISE(n, accepted_value) ──┤
+    │     "OK, I won't accept lower"   │
+```
+
+1. Proposer picks a unique proposal number `n`
+2. Sends `PREPARE(n)` to all acceptors
+3. Acceptor responds with `PROMISE` if `n` is highest seen, plus any previously accepted value
+
+**Phase 2: Accept**
+
+```
+Proposer                           Acceptors
+    │                                  │
+    ├──── ACCEPT(n, value) ───────────►│
+    │     "Accept this value for #n"   │
+    │                                  │
+    │◄─── ACCEPTED(n, value) ──────────┤
+    │     "Done"                       │
+```
+
+1. If proposer received majority of promises:
+   - Use highest-numbered previously accepted value (if any)
+   - Otherwise, use proposer's own value
+2. Send `ACCEPT(n, value)` to acceptors
+3. Acceptor accepts if no higher proposal promised
+
+## Why Paxos Is Hard
+
+The protocol seems simple, but implementing it correctly is notoriously difficult:
+
+1. **Underspecified**: Lamport's paper focused on theory, not implementation
+2. **Missing pieces**: Leader election, log management, membership changes not addressed
+3. **Subtle failure modes**: Dueling proposers, message reordering, partial failures
+4. **Non-intuitive**: Understanding *why* it's safe requires deep formal reasoning
+
+Quote from Diego Ongaro (Raft creator):
+
+> "We found that very few people were comfortable with Paxos... students and industry practitioners alike struggled to understand Paxos."
+
+## Multi-Paxos: Making It Practical
+
+Basic Paxos decides one value. Real systems need to agree on a **sequence** of values (a replicated log).
+
+**Multi-Paxos optimizations**:
+
+1. **Stable leader**: Elect a distinguished proposer that skips Phase 1
+   - 2 RTT → 1 RTT for normal operation
+2. **Pipelining**: Multiple proposals in flight for different log positions
+3. **Log compaction**: Snapshot state, discard old entries
+
+**Production use**:
+- Google Chubby (distributed lock service)
+- Google Spanner (globally distributed database)
+- Apache Cassandra (Paxos for lightweight transactions)
+
+# Raft: Consensus for Humans
+
+Raft (2014) was designed with a single overriding goal: **understandability**. It provides the same guarantees as Multi-Paxos but with a cleaner decomposition.
+
+## Core Concepts
+
+### Terms
+
+Time is divided into **terms**—monotonically increasing logical clocks:
+
+```
+Term 1          Term 2          Term 3
+┌─────────────┐ ┌─────────────┐ ┌─────────────┐
+│  Leader A   │ │  Leader B   │ │  Leader B   │
+│  (normal    │ │  (normal    │ │  (normal    │
+│  operation) │ │  operation) │ │  operation) │
+└─────────────┘ └─────────────┘ └─────────────┘
+       │               │               │
+       ▼               ▼               ▼
+    Election        Election        (no election,
+    timeout         timeout         same leader)
+```
+
+Each term has at most one leader. Term numbers detect stale leaders.
+
+### Leader Election
+
+All nodes start as **followers**. If a follower receives no heartbeat within the **election timeout** (typically 150-300ms, randomized), it becomes a **candidate**:
+
+```
+                    ┌─────────────────────────────┐
+                    │                             │
+                    ▼                             │
+               ┌────────┐    timeout         ┌────────┐
+Start ────────►│Follower├───────────────────►│Candidate│
+               └────────┘                    └────────┘
+                    ▲                             │
+                    │        vote denied or       │
+                    │        higher term          │
+                    │                             │
+                    │                        vote granted
+                    │                        from majority
+                    │                             │
+                    │                             ▼
+                    │                        ┌────────┐
+                    └────────────────────────┤ Leader │
+                       discovers higher term └────────┘
+```
+
+**Election process**:
+
+1. Increment term, vote for self
+2. Send `RequestVote` to all peers
+3. Win with majority votes
+4. Begin sending heartbeats
+
+**Voting rules**: Grant vote only if candidate's log is at least as up-to-date (prevents data loss).
+
+### Log Replication
+
+Once elected, the leader handles all writes:
+
+```
+Client                Leader              Followers
+  │                     │                     │
+  ├─── Write "x=5" ────►│                     │
+  │                     │                     │
+  │                     ├─── AppendEntries ──►│
+  │                     │    (term, index,    │
+  │                     │     entry)          │
+  │                     │                     │
+  │                     │◄─── Success ────────┤
+  │                     │    (from majority)  │
+  │                     │                     │
+  │◄─── Committed ──────┤                     │
+  │                     │                     │
+  │                     ├─── Heartbeat ──────►│
+  │                     │    (commitIndex)    │
+  │                     │                     │
+```
+
+1. Client sends command to leader
+2. Leader appends to local log
+3. Leader replicates to followers via `AppendEntries`
+4. Once majority acknowledge → committed
+5. Leader applies to state machine, responds to client
+6. Followers apply when they learn of commit
+
+### Safety Guarantees
+
+**Log Matching Property**: If two logs have an entry with the same index and term, all preceding entries are identical.
+
+**Leader Completeness**: A candidate can only win if its log contains all committed entries.
+
+These properties ensure no committed data is ever lost.
+
+## Raft in Numbers
+
+**Latency** (single datacenter):
+
+| Metric | Typical Value |
+|--------|--------------|
+| Write P50 | 1-2ms |
+| Write P99 | 5-10ms |
+| Election timeout | 150-300ms |
+| Heartbeat interval | 50-100ms |
+
+**Cross-region**: 50-150ms (network latency dominates)
+
+**Throughput**:
+- Single leader: 10,000-100,000 writes/sec (SSD-bound)
+- Batching can 10x throughput
+
+## Production Systems Using Raft
+
+| System | Use Case | Cluster Size |
+|--------|----------|-------------|
+| **etcd** | Kubernetes coordination | 3-5 nodes |
+| **CockroachDB** | Distributed SQL | Raft per 64MB range |
+| **TiKV** | Distributed KV | Multi-Raft (thousands of groups) |
+| **Consul** | Service discovery | 3-5 nodes |
+| **Vault** | Secrets management | 3-5 nodes |
+
+# ZAB: ZooKeeper's Protocol
+
+**ZooKeeper Atomic Broadcast (ZAB)** powers Apache ZooKeeper. It's similar to Raft but designed specifically for total order broadcast.
+
+## Key Differences from Paxos
+
+| Aspect | Paxos | ZAB |
+|--------|-------|-----|
+| Focus | Single-value consensus | Ordered sequence delivery |
+| Leader | Not required | Required (primary-backup) |
+| Ordering | No inherent order | Total order guaranteed |
+| Recovery | Per-instance | Epoch-based |
+
+## ZAB in Practice
+
+**ZooKeeper typical deployment**:
+- 3 or 5 nodes
+- Write latency: 1-3ms
+- Read latency: sub-millisecond (local reads)
+
+ZooKeeper provides linearizable writes and sequential consistency for reads from the same client.
+
+# The Trade-offs: Latency, Throughput, Availability
+
+## Round Trips Required
+
+| Protocol | Normal Case | With Leader |
+|----------|-------------|-------------|
+| Basic Paxos | 2 RTT | - |
+| Multi-Paxos | 1 RTT | Yes |
+| Raft | 1 RTT | Yes |
+| ZAB | 1 RTT | Yes |
+| PBFT | 2 RTT | O(n²) messages |
+
+## The Leader Bottleneck
+
+Strong leader protocols (Raft, Multi-Paxos, ZAB) serialize all writes through one node:
+
+```
+          ┌─────────────────┐
+          │     Clients     │
+          └────────┬────────┘
+                   │
+                   ▼
+          ┌─────────────────┐
+          │     Leader      │  ◄── Bottleneck
+          │  (all writes)   │
+          └────────┬────────┘
+                   │
+         ┌─────────┼─────────┐
+         ▼         ▼         ▼
+    ┌─────────┐ ┌─────────┐ ┌─────────┐
+    │Follower │ │Follower │ │Follower │
+    └─────────┘ └─────────┘ └─────────┘
+```
+
+**Bottleneck factors**:
+- Disk fsync (1-5ms per batch)
+- Network bandwidth
+- CPU for serialization
+
+**Scaling strategies**:
+1. **Sharding**: Multiple Raft groups (CockroachDB, TiKV)
+2. **Batching**: Group writes, amortize fsync
+3. **Read scaling**: Follower reads for stale-tolerant queries
+
+## Network Partition Handling
+
+Consensus chooses **consistency over availability** (CP in CAP).
+
+```
+Network Partition Scenario:
+                    ┌──────────────────────────────────────┐
+                    │          NETWORK PARTITION           │
+                    └──────────────────────────────────────┘
+
+┌─────────────────────────┐     ║     ┌─────────────────────────┐
+│   Minority Partition    │     ║     │   Majority Partition    │
+│                         │     ║     │                         │
+│  ┌─────┐    ┌─────┐     │     ║     │   ┌─────┐    ┌─────┐    │
+│  │Node │    │Node │     │     ║     │   │Node │    │Node │    │
+│  │  A  │    │  B  │     │     ║     │   │  C  │    │  D  │    │
+│  └─────┘    └─────┘     │     ║     │   │Leader│   └─────┘    │
+│                         │     ║     │   └─────┘              │
+│  ✗ Cannot write         │     ║     │                        │
+│  ✓ Can serve stale reads│     ║     │   ┌─────┐              │
+│                         │     ║     │   │Node │              │
+└─────────────────────────┘     ║     │   │  E  │              │
+                                ║     │   └─────┘              │
+                                ║     │                        │
+                                ║     │  ✓ Can write (quorum)  │
+                                ║     │  ✓ Full operation      │
+                                ║     └────────────────────────┘
+```
+
+- **Minority partition**: Rejects writes, can serve stale reads
+- **Majority partition**: Continues normal operation
+- **After healing**: Minority catches up from majority log
+
+# Read Optimization Strategies
+
+Writes require consensus. Reads don't always have to.
+
+## Strategy Comparison
+
+| Strategy | Latency | Consistency | Network |
+|----------|---------|-------------|---------|
+| **Follower read** | 0.1-0.5ms | Stale (eventual) | None |
+| **Lease-based read** | 0.5-2ms | Linearizable | None |
+| **Read index** | 1-3ms | Linearizable | 1 RTT |
+| **Quorum read** | 1-3ms | Linearizable | 1 RTT |
+
+## Lease-Based Reads
+
+The leader maintains a **time-based lease**. During the lease, it can serve reads locally without consensus:
+
+```
+Leader                          Followers
+   │                                │
+   │◄─── Lease renewed ─────────────┤
+   │     (from heartbeat responses) │
+   │                                │
+   ├─── Can serve reads locally ────┼── For lease duration
+   │    (no network round trip)     │
+   │                                │
+   │     Lease expires...           │
+   ├─── Must refresh or step down ──┤
+```
+
+**Requirement**: Bounded clock drift. If clocks diverge too much, reads may not be linearizable.
+
+## Follower Reads
+
+For stale-tolerant workloads (analytics, dashboards), read from any replica:
+
+- Sub-millisecond latency
+- Scales with replica count
+- May return outdated data
+
+# Modern Variations
+
+## EPaxos: Leaderless Consensus
+
+**Egalitarian Paxos** eliminates the leader bottleneck:
+
+- Any replica can propose
+- Non-conflicting commands: 1 RTT (fast path)
+- Conflicting commands: 2 RTT (slow path)
+
+**Trade-off**: Lower WAN latency, but higher implementation complexity and overhead when conflicts are common.
+
+## Flexible Paxos
+
+**Insight**: Phase 1 and Phase 2 quorums don't need to be the same—they just need to intersect.
+
+**Classical**: Q₁ = Q₂ = majority
+**Flexible**: Q₁ + Q₂ > N
+
+Examples:
+- Q₁ = 1, Q₂ = N: Fast leader election, expensive accept
+- Q₁ = N, Q₂ = 1: Expensive prepare, fast normal operation
+
+Used in Azure Storage for optimizing different workload patterns.
+
+## PBFT: Byzantine Fault Tolerance
+
+For environments where you can't trust all participants:
+
+- Requires `3f + 1` nodes for `f` Byzantine failures
+- O(n²) message complexity
+- ~10x lower throughput than crash-fault protocols
+
+**Modern BFT variants**:
+- **HotStuff**: Linear message complexity (used in Diem)
+- **Tendermint**: Used in Cosmos blockchain
+
+# Practical Considerations
+
+## Cluster Sizing
+
+| Nodes | Failures Tolerated | Quorum | When to Use |
+|-------|-------------------|--------|-------------|
+| 3 | 1 | 2 | Development, small deployments |
+| 5 | 2 | 3 | **Most production systems** |
+| 7 | 3 | 4 | High availability requirements |
+| 9+ | 4+ | 5+ | Rare (latency overhead) |
+
+**Why 5 is optimal for most cases**:
+- Tolerates 2 simultaneous failures
+- Allows rolling upgrade (1 node) + 1 unexpected failure
+- Good balance of availability vs. cost and latency
+
+**Why odd numbers**: 4 nodes tolerates same failures as 3 (both need 3 for quorum). Even nodes waste resources.
+
+## Write Latency Components
+
+```
+Write Latency = max(RTT + fsync) across quorum
+
+┌──────────────────────────────────────────────┐
+│  Write Path                                  │
+├──────────────────────────────────────────────┤
+│  Network RTT:     0.5-1ms (datacenter)       │
+│                   50-150ms (cross-region)    │
+│  Disk fsync:      1-5ms (SSD)                │
+│                   5-15ms (HDD)               │
+│  Processing:      <0.1ms                     │
+├──────────────────────────────────────────────┤
+│  Same datacenter: 2-5ms                      │
+│  Cross-region:    50-150ms                   │
+└──────────────────────────────────────────────┘
+```
+
+## etcd Benchmark Numbers
+
+| Operation | Throughput |
+|-----------|-----------|
+| Sequential writes | ~10,000/sec |
+| Batched writes | ~50,000/sec |
+| Linearizable reads | ~50,000/sec |
+| Follower reads | ~200,000/sec |
+
+# Choosing a Protocol
+
+## Decision Matrix
+
+| Requirement | Best Choice |
+|-------------|------------|
+| New system, team must maintain | **Raft** (understandable) |
+| Google ecosystem, existing Paxos | **Paxos** |
+| Coordination service | **ZAB** (ZooKeeper) |
+| Untrusted nodes, blockchain | **PBFT/HotStuff** |
+| WAN optimization needed | **EPaxos** or **Flexible Paxos** |
+
+## Common Pitfalls
+
+1. **Under-provisioning**: Need MAJORITY, not just "some" replicas
+2. **Clock assumptions**: Don't assume synchronized clocks without NTP/TrueTime
+3. **Ignoring partitions**: Test minority partition behavior
+4. **Manual config changes**: Use proper joint consensus, not manual intervention
+5. **Ignoring disk**: fsync is often the bottleneck—use SSDs
+
+# Conclusion: The Price of Agreement
+
+Consensus protocols solve the fundamental problem of distributed agreement. The key trade-offs:
+
+1. **Safety vs. Liveness**: Protocols choose safety (correctness) and may block during failures
+2. **Consistency vs. Latency**: Strong consistency requires coordination overhead
+3. **Simplicity vs. Performance**: Leader-based protocols are simpler but create bottlenecks
+
+For most production systems:
+- Use **Raft** (or Raft-based systems like etcd)
+- Deploy **5 nodes** for production
+- Expect **1-5ms write latency** within a datacenter
+- Use **follower reads** for stale-tolerant queries
+- **Shard** if you need to scale writes
+
+Understanding consensus means understanding the fundamental limits of distributed systems—and designing within those limits rather than pretending they don't exist.
+
+---
+
+*Next: Caching Strategies — The Performance Multiplier*
