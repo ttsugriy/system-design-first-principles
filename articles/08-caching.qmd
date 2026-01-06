@@ -1,0 +1,635 @@
+---
+title: "Caching Strategies"
+subtitle: "The Performance Multiplier"
+author: "Taras Tsugrii"
+date: today
+bibliography: ../references.bib
+---
+
+# Introduction: Why Caching Works
+
+There's a famous quote in computer science:
+
+> "There are only two hard things in Computer Science: cache invalidation and naming things." — Phil Karlton
+
+The first half is true—cache invalidation is genuinely difficult. But caching itself is straightforward and extraordinarily effective. Why?
+
+Because access patterns aren't random. They follow **power laws**:
+
+- 20% of data receives 80% of requests
+- 1% of users generate 50% of content views
+- Top 10% of products account for 70% of sales
+
+This skew creates **hot data**—frequently accessed, rarely changed. A cache storing just 20% of your dataset can satisfy 80% of requests.
+
+# The Mathematics of Caching
+
+## Hit Rate Impact
+
+**Average access time** with a cache:
+
+$$\text{Average Time} = (\text{Hit Rate} \times \text{Cache Latency}) + (\text{Miss Rate} \times \text{Backend Latency})$$
+
+**Example**:
+- Cache latency: 1ms (Redis)
+- Backend latency: 100ms (database)
+- Hit rate: 95%
+
+$$\text{Average} = (0.95 \times 1\text{ms}) + (0.05 \times 100\text{ms}) = 5.95\text{ms}$$
+
+Without cache: 100ms. With 95% hit rate: 5.95ms. **16.8× speedup**.
+
+## Hit Rate vs. Performance
+
+| Hit Rate | Avg Latency | Speedup |
+|----------|-------------|---------|
+| 50% | 50.5ms | 2× |
+| 80% | 20.8ms | 5× |
+| 90% | 10.9ms | 9× |
+| 95% | 5.95ms | 17× |
+| 99% | 1.99ms | 50× |
+
+Notice: going from 90% to 99% doubles performance. Small improvements at high hit rates have outsized impact.
+
+# Cache Placement: Where to Cache
+
+Caching happens at every layer. Each layer has different characteristics.
+
+```
+Browser Cache (0ms)              ← Closest to user
+      ↓
+CDN Edge Cache (10-50ms)         ← Geographic distribution
+      ↓
+Application Cache (0.01ms)       ← In-process memory
+      ↓
+Distributed Cache (0.5-2ms)      ← Shared across instances
+      ↓
+Database Buffer Pool (1-5ms)     ← Database memory
+      ↓
+Disk (~100ms)                    ← Source of truth
+```
+
+## Client-Side (Browser/App)
+
+**Latency**: 0-1ms
+
+**Mechanisms**:
+- HTTP caching headers (`Cache-Control`, `ETag`)
+- LocalStorage (5-10MB per domain)
+- IndexedDB (larger, structured data)
+
+**Trade-offs**:
+- Zero backend load
+- Instant response
+- No control after deployment (cache invalidation is hard)
+- Security concerns (don't cache sensitive data)
+
+**Use for**: Static assets (JS, CSS, images), API responses with low update frequency.
+
+## CDN (Edge Caching)
+
+**Latency**: 10-50ms globally
+
+**Major providers**:
+- Cloudflare (300+ locations)
+- Fastly (80+ locations)
+- Amazon CloudFront (400+ locations)
+
+**Trade-offs**:
+- Global distribution → faster for distant users
+- High hit rates for static content (95-99%)
+- Content purging can take seconds to minutes (Fastly: 150ms, Cloudflare: 30-60s)
+
+**Use for**: Static content, API responses for read-heavy endpoints.
+
+## Application Cache (In-Process)
+
+**Latency**: 0.01-0.1ms
+
+**Libraries**:
+- Caffeine (Java) — W-TinyLFU eviction, ~15GB/s throughput
+- Guava (Java) — LRU-based, older
+- functools.lru_cache (Python)
+
+**Trade-offs**:
+- Lowest latency (no network)
+- Doesn't scale across instances (each server has separate cache)
+- Lost on restart
+- Memory contention with application
+
+**Use for**: Hot data local to each instance.
+
+## Distributed Cache (Redis, Memcached)
+
+**Latency**: 0.5-2ms
+
+| Feature | Redis | Memcached |
+|---------|-------|-----------|
+| **Throughput** | 100k-500k ops/sec | 200k-1M ops/sec |
+| **P50 latency** | 0.3ms | 0.2ms |
+| **P99 latency** | 2.1ms | 0.8ms |
+| **Data structures** | Strings, hashes, lists, sets, sorted sets | Key-value only |
+| **Persistence** | RDB/AOF | None |
+| **Replication** | Built-in | None |
+| **Threading** | Single (I/O threads in v6+) | Multi-threaded |
+
+**When to choose Redis**: Complex data structures, persistence, pub/sub.
+**When to choose Memcached**: Pure key-value, maximum throughput.
+
+## Database Buffer Pool
+
+**Latency**: 1-5ms (buffer hit), 100ms+ (disk)
+
+**PostgreSQL**: `shared_buffers` (typically 25% of RAM)
+**MySQL InnoDB**: `innodb_buffer_pool_size` (typically 70-80% of RAM)
+
+**Target hit rate**: 99%+ in well-tuned systems
+
+## Multi-Tier Caching
+
+Real systems layer caches:
+
+```
+Example: E-commerce product page
+
+Browser → Product images (24hr TTL)           60% hit
+CDN → Static assets (7 day TTL)               25% of remainder
+App Cache → Hot products (5 min TTL)          80% of remainder
+Redis → All products (1hr TTL)                95% of remainder
+Database → Source of truth                    Receives <0.5% of requests
+```
+
+**Effective database load reduction**: 99.5% (200× fewer database queries)
+
+# Eviction Policies: What to Remove
+
+When the cache is full, what do you evict?
+
+## LRU (Least Recently Used)
+
+**How it works**: Track access order. Evict the least recently accessed item.
+
+```
+Access sequence: A B C D E (cache size = 3)
+
+After A: [A]
+After B: [A, B]
+After C: [A, B, C]  ← Full
+After D: [B, C, D]  ← A evicted (least recent)
+After E: [C, D, E]  ← B evicted
+```
+
+**Trade-offs**:
+- O(1) get and put
+- Works well for temporal locality
+- Vulnerable to scans (sequential access evicts hot data)
+- Ignores frequency (item accessed once recently beats item accessed 100 times less recently)
+
+**Typical hit rates**: 85-95% for good workloads, 20-40% for scans.
+
+## LFU (Least Frequently Used)
+
+**How it works**: Track access count. Evict item with lowest count.
+
+**Trade-offs**:
+- Better for frequency-based patterns
+- Stale items with high historical count stick around
+- New items hard to promote (start with count=1)
+
+**Typical hit rates**: 5-10% better than LRU on frequency-biased workloads.
+
+## W-TinyLFU (Window-TinyLFU)
+
+**Used by**: Caffeine cache (Java)
+
+**How it works**:
+1. **Window cache (1%)**: LRU for new items
+2. **Main cache (99%)**: Segmented LRU
+3. **Frequency sketch**: Count-Min sketch tracks frequency
+4. **Admission policy**: New item only replaces old if higher frequency
+
+**Trade-offs**:
+- Combines recency + frequency
+- Scan resistant (window protects main cache)
+- 2-3% memory overhead for sketch
+
+**Benchmark results**:
+
+| Workload | LRU Hit Rate | W-TinyLFU Hit Rate | Improvement |
+|----------|--------------|-------------------|-------------|
+| Search traces | 48.2% | 53.7% | +11% |
+| Database traces | 42.1% | 47.3% | +12% |
+| Web traces | 51.3% | 55.1% | +7% |
+
+## Policy Comparison
+
+| Policy | Hit Rate | Implementation | Best For |
+|--------|----------|----------------|----------|
+| FIFO | Low | Simple | Short TTL |
+| Random | Moderate | Simple | Uniform access |
+| LRU | Good | LinkedHashMap | Temporal locality |
+| LFU | Better | Complex | Frequency patterns |
+| W-TinyLFU | Best | Moderate | Mixed workloads |
+
+**Rule of thumb**: Use LRU for simplicity, W-TinyLFU (Caffeine) for production Java applications.
+
+# Cache Patterns: How to Use the Cache
+
+## Cache-Aside (Lazy Loading)
+
+```python
+def get_user(user_id):
+    # Try cache first
+    user = cache.get(f"user:{user_id}")
+    if user:
+        return user
+
+    # Cache miss: load from database
+    user = database.query("SELECT * FROM users WHERE id = ?", user_id)
+
+    # Populate cache
+    cache.set(f"user:{user_id}", user, ttl=3600)
+    return user
+```
+
+**Trade-offs**:
+- Only cache what's requested
+- Cache failure degrades gracefully
+- Initial request always misses
+- Three round-trips on miss
+
+**Best for**: Read-heavy workloads, unpredictable access.
+
+## Write-Through
+
+```python
+def update_user(user_id, data):
+    # Write to database
+    database.update(user_id, data)
+
+    # Write to cache (synchronously)
+    cache.set(f"user:{user_id}", data, ttl=3600)
+
+    return success
+```
+
+**Trade-offs**:
+- Cache always consistent
+- No miss on reads after writes
+- Higher write latency (two writes)
+- Wasted if data not read again
+
+**Best for**: Read-heavy where stale data is unacceptable.
+
+## Write-Behind (Write-Back)
+
+```python
+def update_user(user_id, data):
+    # Write to cache immediately
+    cache.set(f"user:{user_id}", data)
+
+    # Queue database write (async)
+    write_queue.enqueue(user_id, data)
+
+    return success  # Return before DB write
+
+# Background: batch writes to database
+```
+
+**Trade-offs**:
+- Lowest write latency
+- Can batch database writes (10-100× throughput)
+- Data loss risk if cache crashes
+- Cache becomes temporary source of truth
+
+**Best for**: High-throughput writes (analytics, gaming leaderboards).
+
+## Pattern Comparison
+
+| Pattern | Write Latency | Consistency | Data Loss Risk |
+|---------|---------------|-------------|----------------|
+| Cache-Aside | Low (DB only) | Eventual | None |
+| Write-Through | High (DB + cache) | Strong | None |
+| Write-Behind | Very Low (cache) | Weak | High |
+
+# Consistency Challenges
+
+## Cache Invalidation
+
+**Three strategies**:
+
+### 1. TTL (Time-To-Live)
+
+```python
+cache.set("product:123", data, ttl=300)  # 5 minutes
+```
+
+- Simple, no coordination
+- Bounded staleness
+- Unnecessary refreshes
+
+**TTL guidelines**:
+
+| Data Type | TTL | Reasoning |
+|-----------|-----|-----------|
+| User profile | 5-15 min | Infrequent changes |
+| Product catalog | 1-6 hours | Rare changes, high reads |
+| Session | 30 min - 2 hr | Match timeout |
+| Trending content | 30-60 sec | Needs freshness |
+
+### 2. Event-Based Invalidation
+
+```python
+def update_user(user_id, data):
+    database.update(user_id, data)
+    cache.delete(f"user:{user_id}")  # Immediate invalidation
+```
+
+- Immediate consistency
+- Must identify all affected keys
+- Race conditions possible
+
+**Race condition problem**:
+
+```
+Thread 1: Read DB (v1) → [suspended]
+Thread 2: Update DB (v2) → Delete cache
+Thread 1: [resumes] → Write cache (v1)  ← Stale!
+```
+
+**Solution**: Always use TTL as fallback:
+
+```python
+cache.set(key, value, ttl=300)  # Safety net
+cache.delete(key)  # Immediate on updates
+```
+
+### 3. Versioning
+
+```python
+cache.set(f"user:{user_id}:v{version}", data)
+```
+
+- Detects stale data reliably
+- Requires checking database metadata
+
+## Thundering Herd Problem
+
+**The problem**:
+
+```
+Cache entry expires at 10:00:00
+10:00:00.001 → 10,000 requests arrive
+All miss cache → All query database
+Database overloads
+```
+
+**Solution 1: Locking**
+
+```python
+def get_with_lock(key):
+    value = cache.get(key)
+    if value:
+        return value
+
+    # Only one request loads data
+    if cache.add(f"lock:{key}", 1, ttl=10):
+        try:
+            value = database.query(key)
+            cache.set(key, value)
+            return value
+        finally:
+            cache.delete(f"lock:{key}")
+    else:
+        time.sleep(0.1)
+        return get_with_lock(key)  # Retry
+```
+
+**Solution 2: Probabilistic Early Expiration**
+
+As expiration approaches, probabilistically refresh early:
+
+- Higher traffic → more likely to refresh before expiration
+- Only one request (probabilistically) hits database
+- Others serve slightly stale data while refresh happens
+
+**Effect**: Reduces database spikes by 10-100×.
+
+## Cache Stampede Prevention
+
+**Problem**: Multiple cache layers expire simultaneously
+
+**Solution**: Staggered TTLs with jitter
+
+```python
+base_ttl = 3600
+jitter = random.randint(-300, 300)  # ±5 minutes
+cache.set(key, value, ttl=base_ttl + jitter)
+```
+
+# Distributed Caching
+
+## Consistent Hashing
+
+**Problem**: Traditional hash `node = hash(key) % node_count` invalidates most keys when nodes change.
+
+**Solution**: Consistent hashing
+
+```
+Hash Ring (0 to 2³²)
+         0°
+          │
+    Node A●──────────●Node B
+         │            │
+   270°──┼────────────┼──90°
+         │            │
+    Node D●──────────●Node C
+          │
+        180°
+
+Key "user:123" → hash to 45° → assigned to Node B (first clockwise)
+```
+
+**Effect**:
+- Adding/removing node: Only 1/N keys move (vs. (N-1)/N traditional)
+- Virtual nodes improve distribution
+
+## Replication
+
+**Redis replication**:
+
+```
+Master (writes)
+  ├─→ Replica 1 (reads)
+  ├─→ Replica 2 (reads)
+  └─→ Replica 3 (reads)
+```
+
+**Modes**:
+- **Async** (default): Low latency, potential data loss
+- **Sync** (with WAIT): Guaranteed durability, higher latency
+
+## Cache Warming
+
+**Problem**: Empty cache → all requests hit database
+
+**Solution 1: Proactive warming**
+
+```python
+def warm_cache():
+    top_items = analytics.get_top_queries(limit=10000)
+    for item in top_items:
+        data = database.query(item.key)
+        cache.set(item.key, data)
+```
+
+**Solution 2: Snapshot/restore**
+
+```python
+# Before restart
+cache.dump("/backup/cache.rdb")
+
+# On startup
+cache.load("/backup/cache.rdb")
+```
+
+Netflix EVCache can restore 1TB in ~5 minutes using EBS snapshots.
+
+# Real-World Numbers
+
+## Latency Reference
+
+| Cache Type | Latency | Use Case |
+|------------|---------|----------|
+| In-process (Caffeine) | 0.01ms | Hot data |
+| Redis (datacenter) | 0.5-2ms | Distributed |
+| CDN (edge) | 10-50ms | Global users |
+| Database (buffer hit) | 1-5ms | DB caching |
+| Database (disk) | 100ms+ | Cold data |
+
+## Typical Hit Rates
+
+| System | Target | Achievable |
+|--------|--------|------------|
+| CDN (static) | >95% | 97-99% |
+| CDN (API) | >70% | 75-85% |
+| App cache | >90% | 92-96% |
+| Distributed cache | >85% | 88-94% |
+| Database buffer | >99% | 99%+ |
+
+## Memory Sizing
+
+**Formula**:
+
+$$\text{Memory} = \text{Dataset} \times \text{Coverage} \times (1 + \text{Overhead}) / \text{Compression}$$
+
+**Example** (e-commerce):
+- 1M products × 5KB = 5GB raw
+- Coverage: 100%
+- Redis overhead: 30%
+- Total: 5GB × 1.3 = **6.5GB**
+
+# Production Systems
+
+## Facebook TAO
+
+**What**: Distributed cache for social graph
+
+**Scale**:
+- 1+ trillion requests/day (12M/sec)
+- 99%+ hit rate
+- <1ms P50 latency
+
+**Architecture**:
+```
+TAO Leaders (writes) → MySQL
+      ↓ async
+TAO Followers (reads) ← 10-20 per leader
+```
+
+**Key insight**: Write-through caching can scale to trillion requests/day.
+
+## Netflix EVCache
+
+**What**: Memcached-based distributed cache
+
+**Scale**:
+- 30M+ requests/second globally
+- 10+ TB total cache
+- 90-95% hit rate
+
+**Key features**:
+- 3-way replication across AZs
+- EBS snapshots for warm-up
+- Circuit breakers for graceful degradation
+
+## CDN Performance
+
+| Provider | Avg TTFB | Locations | Purge Speed |
+|----------|----------|-----------|-------------|
+| Cloudflare | 12ms | 300+ | 30-60s |
+| Fastly | 15ms | 80+ | 150ms |
+| CloudFront | 18ms | 400+ | 5-30min |
+
+# When Caching Hurts
+
+## Low Hit Rate (<50%)
+
+If 50% of requests miss, you're adding overhead (cache check) without benefit.
+
+**Example**: Long-tail search queries
+- 1M unique queries/day
+- 10% overlap
+- Hit rate: ~10%
+- Cache overhead exceeds benefit
+
+## High Churn
+
+Real-time data changing faster than TTL:
+- Stock prices (100ms updates)
+- Live sports scores
+
+**Solution**: Skip cache, query directly.
+
+## Cache Pollution
+
+Sequential scans evict hot data:
+
+```python
+# Backup job reads all records
+for record in database.scan():
+    cache.set(record.id, record)  # Evicts hot data!
+```
+
+**Solution**: Bypass cache for batch operations.
+
+## Small Working Set
+
+If working set fits in database buffer pool:
+- Database cache: 0.1ms
+- Network to Redis: 0.5ms
+
+Separate cache adds latency.
+
+# Conclusion: Caching as a Discipline
+
+Caching is not just "add Redis and go." Effective caching requires understanding:
+
+1. **Access patterns**: Where is the hot data?
+2. **Consistency requirements**: How stale is acceptable?
+3. **Failure modes**: What happens when cache fails?
+4. **Eviction policies**: What to keep, what to discard?
+
+**Key principles**:
+
+- **Layer caches**: Client → CDN → App → Distributed → Database
+- **Hit rate is everything**: Measure and optimize aggressively
+- **TTL as safety net**: Always set TTL, even with invalidation
+- **Prevent thundering herd**: Locking or probabilistic expiration
+- **Know when NOT to cache**: Low hit rate, high churn, small working set
+
+The math is compelling: 95% hit rate gives 17× speedup. The engineering is challenging: cache invalidation remains hard. But the effort is worthwhile—caching is the single most effective performance optimization for most systems.
+
+---
+
+*Next: Part III — Composition: Building Systems from Primitives*

@@ -22,7 +22,7 @@ book:
         - articles/05-lsm-trees.qmd
         - articles/06-b-trees.qmd
         - articles/07-consensus.qmd
-        # - articles/08-caching.qmd
+        - articles/08-caching.qmd
     # - part: "Part III: Composition"
     #   chapters:
     #     - articles/09-combining-primitives.qmd
