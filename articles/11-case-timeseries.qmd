@@ -1,0 +1,531 @@
+---
+title: "Case Study: Time-Series Database"
+subtitle: "Optimizing for Time"
+author: "Taras Tsugrii"
+date: today
+bibliography: ../references.bib
+---
+
+# The Problem
+
+Build a database optimized for time-series data: metrics, logs, events, sensor readings. Data that arrives continuously, ordered by time.
+
+Time-series data has unique characteristics that make general-purpose databases inefficient:
+
+- **Write patterns**: Append-only, high-volume, time-ordered
+- **Read patterns**: Recent data is hot, historical data is cold
+- **Query patterns**: Range queries, aggregations, rollups
+- **Lifecycle**: Data expires; old data less valuable than new
+
+These patterns enable specialized optimizations that general databases can't match.
+
+# Requirements
+
+## Functional Requirements
+- Ingest timestamped metrics: `(metric_name, tags, timestamp, value)`
+- Query by time range: "CPU usage for server-01 in the last hour"
+- Aggregate across time: "Average response time per minute"
+- Downsample and expire: Keep raw data 7 days, hourly rollups 1 year
+
+## Non-Functional Requirements
+
+| Requirement | Target |
+|-------------|--------|
+| Ingestion rate | 1 million points/second |
+| Query latency (recent) | <100ms |
+| Query latency (historical) | <1s |
+| Compression ratio | 10-20× |
+| Storage | 100 TB/year raw |
+
+## Data Model
+
+```
+Metric:
+  name:      "http.request.duration"
+  tags:      {server: "web-01", region: "us-east", endpoint: "/api/v1"}
+  timestamp: 1704067200000000000  (nanosecond precision)
+  value:     42.5                 (float64)
+```
+
+A **series** is a unique combination of metric name + tags. Each series is an independent stream of (timestamp, value) pairs.
+
+# Why General Databases Fail
+
+## PostgreSQL on Time-Series
+
+Insert 1 million rows/second into PostgreSQL:
+
+```sql
+CREATE TABLE metrics (
+    time TIMESTAMPTZ NOT NULL,
+    server TEXT,
+    value DOUBLE PRECISION
+);
+CREATE INDEX idx_time ON metrics (time);
+```
+
+**Problems**:
+- B-tree index overhead per insert
+- Random I/O for index updates
+- No time-based partitioning by default
+- No compression for timestamp sequences
+- Aggregation queries scan full table
+
+**Result**: 10K inserts/second, not 1M. 100× slower than needed.
+
+## The Time-Series Advantage
+
+Time-series databases exploit predictable patterns:
+
+| Pattern | Optimization |
+|---------|-------------|
+| Append-only writes | LSM-tree, sequential I/O |
+| Time-ordered | Time-based partitioning |
+| Regular timestamps | Delta-of-delta compression |
+| Slowly changing values | XOR compression |
+| Recent data hot | Tiered storage |
+| Range queries | Partition pruning |
+| Aggregations | Pre-computed rollups |
+
+# Architecture
+
+## High-Level Design
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Time-Series Database                      │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────────────────────────────────────────────────┐│
+│  │                    Write Path                           ││
+│  │  Ingest → WAL → Memory Buffer → Flush → Compressed Block││
+│  └─────────────────────────────────────────────────────────┘│
+│                                                             │
+│  ┌─────────────────────────────────────────────────────────┐│
+│  │                   Storage Layer                         ││
+│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐       ││
+│  │  │Block    │ │Block    │ │Block    │ │Block    │       ││
+│  │  │12:00-14:00│14:00-16:00│16:00-18:00│18:00-20:00│     ││
+│  │  │(hot)    │ │         │ │         │ │(cold)   │       ││
+│  │  └─────────┘ └─────────┘ └─────────┘ └─────────┘       ││
+│  └─────────────────────────────────────────────────────────┘│
+│                                                             │
+│  ┌─────────────────────────────────────────────────────────┐│
+│  │                    Index Layer                          ││
+│  │  Series Index: metric + tags → block locations          ││
+│  │  Time Index:   time range → relevant blocks             ││
+│  └─────────────────────────────────────────────────────────┘│
+│                                                             │
+│  ┌─────────────────────────────────────────────────────────┐│
+│  │                    Query Engine                         ││
+│  │  Range queries | Aggregations | Downsampling            ││
+│  └─────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Time-Based Partitioning
+
+Partition data into time blocks (2 hours, 1 day, etc.):
+
+```
+Data Timeline:
+┌──────────┬──────────┬──────────┬──────────┬──────────┐
+│  Day 1   │  Day 2   │  Day 3   │  Day 4   │  Day 5   │
+│  Block   │  Block   │  Block   │  Block   │  Block   │
+└──────────┴──────────┴──────────┴──────────┴──────────┘
+
+Query: "Last 2 days"
+         │
+         ▼
+     ┌──────────┬──────────┐
+     │  Day 4   │  Day 5   │  ← Only scan 2 blocks
+     └──────────┴──────────┘
+```
+
+**Benefits**:
+- Query partition pruning: Skip irrelevant time periods
+- Efficient deletion: Drop entire blocks (no tombstones)
+- Tiered storage: Move old blocks to cold storage
+- Parallel queries: Scan blocks concurrently
+
+**Block size trade-offs**:
+
+| Block Duration | Write Efficiency | Query Granularity | Compaction |
+|---------------|-----------------|-------------------|------------|
+| 2 hours | Low | Fine | Frequent |
+| 1 day | Medium | Medium | Daily |
+| 1 week | High | Coarse | Weekly |
+
+## Compression: The Key Advantage
+
+Time-series data compresses extremely well due to predictable patterns.
+
+### Delta-of-Delta Timestamps
+
+Timestamps at regular intervals (every 60 seconds) compress dramatically:
+
+```
+Raw timestamps (64 bits each):
+  t0 = 1704067200  (full)
+  t1 = 1704067260  (full)
+  t2 = 1704067320  (full)
+  t3 = 1704067380  (full)
+
+Delta encoding:
+  t0 = 1704067200  (64 bits)
+  Δ1 = 60          (6 bits)
+  Δ2 = 60          (6 bits)
+  Δ3 = 60          (6 bits)
+
+Delta-of-delta encoding:
+  t0 = 1704067200  (64 bits)
+  Δ1 = 60          (6 bits)
+  ΔΔ2 = 0          (1 bit: "same as before")
+  ΔΔ3 = 0          (1 bit)
+```
+
+**Compression ratio**: 4 × 64 bits = 256 bits → 64 + 6 + 1 + 1 = 72 bits → **3.5×**
+
+With consistent intervals, subsequent timestamps compress to **1 bit each**.
+
+### XOR Value Compression (Gorilla)
+
+Slowly changing float values compress via XOR:
+
+```
+Value sequence:
+  v0 = 42.5     (64 bits, stored in full)
+  v1 = 42.5     (same as v0: 1 bit = '0')
+  v2 = 42.7     (XOR with v1, store only changed bits)
+  v3 = 42.7     (same as v2: 1 bit = '0')
+```
+
+**XOR encoding**:
+1. If value unchanged: single '0' bit
+2. If changed: XOR with previous, store only meaningful bits
+
+**Compression ratio**: 10-50× for typical metrics
+
+### Combined Effect
+
+**Prometheus** reports averaging **1-2 bytes per sample** (vs. 16 bytes uncompressed):
+
+| Component | Uncompressed | Compressed |
+|-----------|--------------|------------|
+| Timestamp | 8 bytes | 0.1-1 byte |
+| Value | 8 bytes | 0.5-1 byte |
+| **Total** | 16 bytes | **1-2 bytes** |
+
+**Compression ratio**: 8-16×
+
+## Storage Engine: TSM (Time-Structured Merge)
+
+Similar to LSM-tree, but optimized for time-series:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    TSM Storage Engine                       │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ┌──────────────────┐    ┌──────────────────┐              │
+│  │   Write-Ahead    │    │   In-Memory      │              │
+│  │      Log         │───►│     Cache        │              │
+│  │   (durability)   │    │  (by series)     │              │
+│  └──────────────────┘    └────────┬─────────┘              │
+│                                   │ flush                   │
+│                                   ▼                         │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │                  TSM Files                            │  │
+│  │  ┌────────────────────────────────────────────────┐  │  │
+│  │  │ Block 1: Series A, timestamps, values (comp)  │  │  │
+│  │  │ Block 2: Series B, timestamps, values (comp)  │  │  │
+│  │  │ Block 3: Series C, timestamps, values (comp)  │  │  │
+│  │  └────────────────────────────────────────────────┘  │  │
+│  │  ┌──────────────────────┐  ┌──────────────────────┐  │  │
+│  │  │   Index (series →    │  │   Footer (offsets)   │  │  │
+│  │  │   block locations)   │  │                      │  │  │
+│  │  └──────────────────────┘  └──────────────────────┘  │  │
+│  └──────────────────────────────────────────────────────┘  │
+│                                                             │
+│  Background: Compaction merges TSM files                    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Key differences from LSM-tree**:
+
+| Aspect | LSM-tree | TSM |
+|--------|----------|-----|
+| Organization | By key range | By time + series |
+| Compression | General (LZ4, Snappy) | Time-series specific (Gorilla) |
+| Compaction | Merge overlapping keys | Merge time blocks |
+| Deletion | Tombstones | Drop entire blocks |
+
+# Write Path
+
+```
+Metric arrives: {name: "cpu.usage", server: "web-01", value: 42.5}
+    │
+    ▼
+1. Append to WAL (sequential, durable)
+    │
+    ▼
+2. Insert into memory buffer (by series)
+    │
+    ▼
+3. Return success
+    │
+    ▼ (background, when buffer full or time elapsed)
+4. Compress and flush to TSM file
+    │
+    ▼ (background)
+5. Compaction: Merge small TSM files
+```
+
+**Write latency**: <1ms (memory + WAL)
+**Throughput**: 1M+ points/second
+
+## Handling High Cardinality
+
+**Problem**: Each unique series creates overhead (index entry, memory buffer).
+
+```
+Good: 10,000 series (manageable)
+  metric: cpu.usage
+  tags: server (100 servers) × region (10 regions) × cpu_core (10 cores)
+  cardinality: 100 × 10 × 10 = 10,000
+
+Bad: 100,000,000 series (death spiral)
+  metric: request.duration
+  tags: user_id (1M users) × endpoint (100) × status (10)
+  cardinality: 1M × 100 × 10 = 1 billion (unbounded!)
+```
+
+**High cardinality impact**:
+
+| Series Count | Write Throughput | Memory |
+|--------------|------------------|--------|
+| 10K | 500K points/s | 100 MB |
+| 1M | 100K points/s | 10 GB |
+| 100M | 10K points/s | 1 TB+ |
+
+**Solutions**:
+- Limit tag cardinality (no user IDs, request IDs)
+- Use metrics for aggregations, logs for details
+- Pre-aggregate at collection time
+
+# Read Path
+
+## Range Query
+
+```
+Query: "cpu.usage for server=web-01, last 1 hour"
+    │
+    ▼
+1. Parse query, identify series
+    │
+    ▼
+2. Find relevant time blocks (partition pruning)
+    │
+    ▼
+3. Load block index → locate series data
+    │
+    ▼
+4. Decompress and return samples
+```
+
+**Optimization**: Only 1-2 blocks scanned for recent data (vs. full table scan in PostgreSQL).
+
+## Aggregation Query
+
+```
+Query: "AVG(cpu.usage) per minute for last 24 hours"
+    │
+    ▼
+1. Identify blocks covering 24 hours
+    │
+    ▼
+2. For each block:
+   a. Decompress timestamps and values
+   b. Bucket by minute
+   c. Compute average per bucket
+    │
+    ▼
+3. Merge buckets across blocks
+    │
+    ▼
+4. Return time-series of averages
+```
+
+**Optimization**: Column-oriented storage enables scanning only value columns (skip metadata).
+
+## Pre-Computed Rollups
+
+For historical queries, pre-aggregate:
+
+```
+Raw data:     10-second samples  → 7 days retention
+1-min rollups:  avg, max, min   → 90 days retention
+1-hour rollups: avg, max, min   → 5 years retention
+
+Query: "CPU usage for last year"
+  → Use 1-hour rollups (8,760 points)
+  → Not raw data (3,153,600,000 points!)
+```
+
+**Implementation**: Continuous aggregation background job:
+
+```
+Every minute:
+  1. Query last minute of raw data
+  2. Compute avg, max, min, count per series
+  3. Write to rollup table/block
+```
+
+# Real System Comparison
+
+## InfluxDB
+
+**Storage**: TSM (Time-Structured Merge tree)
+**Query Language**: InfluxQL / Flux
+
+```
+Architecture:
+- WAL for durability
+- In-memory cache per series
+- TSM files with Gorilla compression
+- Shards by time (7-day default)
+- Retention policies for automatic deletion
+```
+
+**Performance**:
+- Ingestion: 1M+ points/second
+- Compression: 3-10× typical
+- Query: Sub-second for recent data
+
+## TimescaleDB
+
+**Storage**: PostgreSQL with automatic partitioning
+**Query Language**: Full SQL
+
+```
+Architecture:
+- Hypertable: Virtual table abstraction
+- Chunks: 7-day partitions (automatic)
+- Compression: Columnar hybrid format
+- Continuous aggregates: Materialized views
+- 100% PostgreSQL compatible
+```
+
+**Performance**:
+- 1000× faster than vanilla PostgreSQL for time-series
+- 90% compression with columnar format
+- Full SQL flexibility (joins, complex queries)
+
+**Trade-off**: Slightly lower write throughput than specialized TSDBs, but SQL compatibility.
+
+## Prometheus
+
+**Storage**: Local TSDB (2-hour blocks)
+**Query Language**: PromQL
+
+```
+Architecture:
+- 2-hour in-memory blocks
+- Compaction into larger blocks
+- Gorilla compression (1-2 bytes/sample)
+- Remote write for long-term storage
+```
+
+**Use case**: Metrics monitoring (not general time-series). Optimized for pull-based collection.
+
+## ClickHouse
+
+**Storage**: MergeTree (column-oriented)
+**Query Language**: SQL
+
+```
+Architecture:
+- Column-oriented storage
+- Aggressive compression (10× typical)
+- Materialized views for pre-aggregation
+- Distributed query execution
+```
+
+**Performance**:
+- 4.7M rows/second ingestion
+- Complex queries in milliseconds
+- Optimized for analytical workloads
+
+# Production Design
+
+## Final Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Distributed Time-Series Database                     │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   ┌─────────────────────────────────────────────────────────────────┐   │
+│   │                       Ingestion Layer                           │   │
+│   │   Load Balancer → Ingest Nodes (stateless, partition-aware)     │   │
+│   └───────────────────────────────┬─────────────────────────────────┘   │
+│                                   │                                     │
+│   ┌───────────────────────────────▼─────────────────────────────────┐   │
+│   │                       Storage Layer                             │   │
+│   │   ┌─────────────┐  ┌─────────────┐  ┌─────────────┐            │   │
+│   │   │  Partition  │  │  Partition  │  │  Partition  │            │   │
+│   │   │  (time: T0) │  │  (time: T1) │  │  (time: T2) │            │   │
+│   │   │             │  │             │  │             │            │   │
+│   │   │ TSM Engine  │  │ TSM Engine  │  │ TSM Engine  │            │   │
+│   │   │ + Replicas  │  │ + Replicas  │  │ + Replicas  │            │   │
+│   │   └─────────────┘  └─────────────┘  └─────────────┘            │   │
+│   └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│   ┌─────────────────────────────────────────────────────────────────┐   │
+│   │                       Query Layer                               │   │
+│   │   Query Router → Parallel execution → Result merge              │   │
+│   └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│   ┌─────────────────────────────────────────────────────────────────┐   │
+│   │                     Background Jobs                             │   │
+│   │   Compaction | Rollup aggregation | Retention enforcement       │   │
+│   └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│   Metadata: Series catalog, partition map, retention policies           │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Performance Summary
+
+| Metric | Target | Achievable |
+|--------|--------|------------|
+| Ingestion | 1M points/sec | 1-5M points/sec |
+| Query (recent) | <100ms | 10-50ms |
+| Query (historical + rollups) | <1s | 100-500ms |
+| Compression | 10-20× | 10-50× |
+| Storage/year | 100 TB raw | 5-10 TB compressed |
+
+## Key Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Storage engine | TSM (LSM variant) | Write-optimized, time-aware |
+| Partitioning | By time (1-day blocks) | Query pruning, efficient deletion |
+| Compression | Gorilla (delta + XOR) | 10-50× for time-series |
+| Indexing | Series + time | Fast lookups by both dimensions |
+| Rollups | Continuous aggregation | Historical query performance |
+
+# Conclusion
+
+Time-series databases achieve 10-100× better performance than general databases by exploiting predictable patterns:
+
+1. **Time-based partitioning**: Query only relevant time ranges
+2. **Gorilla compression**: Timestamps and values compress dramatically
+3. **Columnar storage**: Aggregations scan only needed columns
+4. **Pre-computed rollups**: Historical queries use summaries
+5. **Block-based retention**: Delete old data efficiently
+
+The trade-off: less flexibility than general databases. No complex joins, limited ad-hoc queries, schema constraints. But for metrics, monitoring, and IoT, specialized time-series databases are essential.
+
+---
+
+*Next: Case Study — Distributed Message Queue*

@@ -27,7 +27,7 @@ book:
       chapters:
         - articles/09-combining-primitives.qmd
         - articles/10-case-kv-store.qmd
-        # - articles/11-case-timeseries.qmd
+        - articles/11-case-timeseries.qmd
         # - articles/12-case-distributed-queue.qmd
     # - part: "Part IV: The AI Era"
     #   chapters:
