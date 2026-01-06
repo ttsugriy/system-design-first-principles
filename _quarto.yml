@@ -23,12 +23,12 @@ book:
         - articles/06-b-trees.qmd
         - articles/07-consensus.qmd
         - articles/08-caching.qmd
-    # - part: "Part III: Composition"
-    #   chapters:
-    #     - articles/09-combining-primitives.qmd
-    #     - articles/10-case-kv-store.qmd
-    #     - articles/11-case-timeseries.qmd
-    #     - articles/12-case-distributed-queue.qmd
+    - part: "Part III: Composition"
+      chapters:
+        - articles/09-combining-primitives.qmd
+        # - articles/10-case-kv-store.qmd
+        # - articles/11-case-timeseries.qmd
+        # - articles/12-case-distributed-queue.qmd
     # - part: "Part IV: The AI Era"
     #   chapters:
     #     - articles/13-ai-design-exploration.qmd

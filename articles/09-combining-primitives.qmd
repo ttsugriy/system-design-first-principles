@@ -1,0 +1,534 @@
+---
+title: "Combining Primitives"
+subtitle: "From Building Blocks to Complete Systems"
+author: "Taras Tsugrii"
+date: today
+bibliography: ../references.bib
+---
+
+# From Atoms to Molecules
+
+In Part II, we studied primitives in isolation: LSM-trees optimize writes, B-trees optimize reads, consensus protocols coordinate distributed state, caching reduces latency. But real systems don't use one primitive—they combine many.
+
+This chapter is about **composition**: how primitives fit together, how their trade-offs interact, and what patterns emerge in production systems.
+
+The key insight:
+
+> Primitives compose, but trade-offs multiply.
+
+Adding a cache improves latency—until you account for invalidation complexity. Adding replication improves durability—but triples write amplification. Understanding these interactions is the difference between systems that work and systems that surprise you at 3 AM.
+
+# Layers of a Storage System
+
+Let's start with what nearly every database needs: a storage engine.
+
+## The Minimal Storage Engine
+
+A storage engine must:
+1. Accept writes durably
+2. Return data on reads
+3. Survive crashes
+
+The minimal design uses three primitives:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Storage Engine                           │
+├─────────────────────────────────────────────────────────────┤
+│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐    │
+│  │   Buffer     │   │     WAL      │   │    Index     │    │
+│  │    Pool      │   │              │   │ (B-tree or   │    │
+│  │  (cache)     │   │ (durability) │   │  LSM-tree)   │    │
+│  └──────────────┘   └──────────────┘   └──────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Buffer Pool**: Cache hot pages in memory. Converts repeated reads into memory operations.
+
+**WAL (Write-Ahead Log)**: Sequential append for durability. Every modification logged before pages updated.
+
+**Index Structure**: B-tree for read-heavy, LSM-tree for write-heavy.
+
+## B-tree Storage Engine (PostgreSQL)
+
+PostgreSQL composes these primitives for read-optimized OLTP:
+
+```
+Write Path:
+1. Append to WAL (sequential, durable)
+2. Modify page in buffer pool (in-memory)
+3. Mark page dirty
+4. Background: flush dirty pages (checkpoint)
+
+Read Path:
+1. Check buffer pool (fast path)
+2. If miss: read page from disk → cache in buffer pool
+3. B-tree traverse: root → internal → leaf
+4. Binary search within page
+```
+
+**Trade-off profile**:
+- Excellent reads (B-tree + buffer pool)
+- Moderate writes (WAL + in-place page updates)
+- Write amplification: 268-530× (full page writes)
+
+## LSM-tree Storage Engine (RocksDB)
+
+RocksDB composes for write-optimized workloads:
+
+```
+Write Path:
+1. Append to WAL (durability)
+2. Insert into memtable (in-memory skip list)
+3. When memtable full: flush to SSTable (Level 0)
+4. Background: compaction merges SSTables
+
+Read Path:
+1. Check memtable (most recent writes)
+2. Check bloom filters for each level
+3. If bloom says "maybe": binary search in SSTable
+4. Merge results from all levels
+```
+
+**Trade-off profile**:
+- Excellent writes (sequential, batched)
+- Moderate reads (multiple levels to check)
+- Write amplification: 38× (compaction)
+- Read amplification: varies by level count
+
+## The Trade-off Interaction
+
+Adding a buffer pool to a B-tree creates an interesting dynamic:
+
+**Without buffer pool**:
+- Every read: 3-4 disk I/Os (tree depth)
+- Latency: 30-40ms
+
+**With buffer pool (99% hit rate)**:
+- Most reads: 0 disk I/Os
+- Latency: <1ms (buffer hit), 30ms (miss)
+- Average: ~1.3ms
+
+The buffer pool transforms the B-tree's weakness (random disk I/O) into a strength (memory-speed lookups for hot data).
+
+# Distributed Database Composition
+
+Moving from single-node to distributed requires more primitives.
+
+## The Standard Stack
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     SQL Interface                           │
+│              Parser → Planner → Optimizer                   │
+├─────────────────────────────────────────────────────────────┤
+│                  Transaction Layer                          │
+│             2PC Coordinator | MVCC | Isolation              │
+├─────────────────────────────────────────────────────────────┤
+│                  Distribution Layer                         │
+│           Sharding | Routing | Rebalancing                  │
+├─────────────────────────────────────────────────────────────┤
+│                   Consensus Layer                           │
+│        Raft/Paxos groups (per shard) | Elections            │
+├─────────────────────────────────────────────────────────────┤
+│                    Storage Layer                            │
+│              LSM-tree or B-tree | Buffer Pool               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Each layer adds capabilities—and costs.
+
+## CockroachDB: The Full Stack
+
+CockroachDB implements the complete stack:
+
+**Storage**: RocksDB (LSM-tree)
+- Per-node key-value storage
+- 64 MB ranges as unit of replication
+
+**Consensus**: Multi-Raft
+- One Raft group per range
+- Thousands of Raft groups per cluster
+- Automatic leader election
+
+**Distribution**: Range-based sharding
+- Automatic range splits at 64 MB
+- Transparent rebalancing
+- Leaseholder handles reads
+
+**Transactions**: Distributed MVCC
+- Serializable isolation
+- Timestamp ordering
+- Write intents + resolution
+
+### Write Path
+
+```
+SQL INSERT
+    │
+    ▼
+Planner → Identify affected ranges
+    │
+    ▼
+Transaction coordinator → Begin transaction
+    │
+    ▼
+Write intent to range leaseholder
+    │
+    ▼
+Raft replication (quorum ack)
+    │
+    ▼
+Commit → Resolve intents → Ack to client
+```
+
+**Latency breakdown**:
+- SQL parsing: <1ms
+- Raft consensus: 1-3ms (local), 50-150ms (cross-region)
+- RocksDB write: 1-5ms
+- **Total**: 5-15ms (local), 50-200ms (cross-region)
+
+### Trade-off Multiplication
+
+**Write amplification stacks**:
+- RocksDB LSM: 38×
+- Raft replication (3 replicas): 3×
+- **Combined**: 38 × 3 = **114×**
+
+For every 1 KB logical write, 114 KB hits disk cluster-wide.
+
+This sounds terrible—but it's acceptable because:
+1. LSM writes are sequential (SSD-friendly)
+2. Raft batches multiple writes
+3. The alternative (B-tree + sync replication) is worse: 530 × 3 = **1,590×**
+
+## Cassandra: Masterless Composition
+
+Cassandra chooses different primitives for different trade-offs:
+
+**Storage**: LSM-tree (per node)
+**Partitioning**: Consistent hashing (no central coordinator)
+**Coordination**: Gossip protocol (peer-to-peer)
+**Consistency**: Tunable quorums
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Cassandra Architecture (Masterless)                        │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│   ┌─────┐    gossip    ┌─────┐    gossip    ┌─────┐        │
+│   │Node │◄────────────►│Node │◄────────────►│Node │        │
+│   │  A  │              │  B  │              │  C  │        │
+│   └──┬──┘              └──┬──┘              └──┬──┘        │
+│      │                    │                    │            │
+│   ┌──▼──┐              ┌──▼──┐              ┌──▼──┐        │
+│   │ LSM │              │ LSM │              │ LSM │        │
+│   │Tree │              │Tree │              │Tree │        │
+│   └─────┘              └─────┘              └─────┘        │
+│                                                             │
+│   Hash Ring: [A: 0-42] [B: 43-85] [C: 86-127]              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Write Path (QUORUM, RF=3)
+
+```
+Client → Any node (coordinator)
+    │
+    ▼
+Hash partition key → Identify 3 replica nodes
+    │
+    ▼
+Send write to all 3 replicas (parallel)
+    │
+    ▼
+Wait for 2 acks (QUORUM) → Ack to client
+    │
+    ▼ (background)
+Hinted handoff if replica down
+```
+
+**Latency**: 1-5ms (local datacenter)
+
+### Trade-off Profile
+
+| Aspect | Cassandra | CockroachDB |
+|--------|-----------|-------------|
+| **Consistency** | Tunable (eventual default) | Serializable |
+| **Coordination** | None (gossip) | Raft per range |
+| **Write latency** | Lower (no consensus) | Higher (Raft) |
+| **Read latency** | Variable (repair) | Predictable |
+| **Cross-shard txn** | Limited (batch) | Full support |
+
+Cassandra trades consistency for availability and write throughput. CockroachDB trades latency for strong consistency.
+
+# Composition Patterns
+
+## Pattern 1: Read/Write Path Separation
+
+**Principle**: Optimize each path independently.
+
+**PostgreSQL**:
+- Write path: WAL (sequential) → buffer pool update
+- Read path: Buffer pool → B-tree
+
+**Kafka**:
+- Write path: Append to leader → replicate → fsync
+- Read path: Sequential fetch from any replica
+
+**Benefit**: Writers don't block readers. Each path can be tuned.
+
+## Pattern 2: Hot/Cold Data Tiering
+
+**Principle**: Store data on tiers matching access frequency.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Hot Tier (Memory/SSD)                                      │
+│  - Latency: 0.1-10ms                                        │
+│  - Recent data (last 7 days)                                │
+│  - Cost: $$$$                                               │
+├─────────────────────────────────────────────────────────────┤
+│  Warm Tier (SSD)                                            │
+│  - Latency: 10-100ms                                        │
+│  - Medium-age data (7-90 days)                              │
+│  - Cost: $$                                                 │
+├─────────────────────────────────────────────────────────────┤
+│  Cold Tier (HDD/S3)                                         │
+│  - Latency: 100ms-seconds                                   │
+│  - Archive data (90+ days)                                  │
+│  - Cost: $                                                  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Facebook TAO** example:
+- L1 cache (in-process): 90% hit, <1ms
+- L2 cache (TAO followers): 95% cumulative, 1-2ms
+- L3 cache (TAO leaders): 99% cumulative, 2-5ms
+- MySQL: <1% of requests
+
+**Benefit**: 99% of requests served from fast tier. 10-100× cost reduction.
+
+## Pattern 3: Consensus + Storage Separation
+
+**Principle**: Replicate at the right layer.
+
+**Option A: Replicate storage** (PostgreSQL streaming replication)
+- WAL shipped to replicas
+- Simple, proven
+- Limited to single-leader
+
+**Option B: Consensus per shard** (CockroachDB, TiKV)
+- Raft group per data range
+- Multi-leader (each range has its own leader)
+- Horizontal write scaling
+
+**Option C: Consensus for metadata only** (Kafka KRaft)
+- Consensus for controller quorum
+- Data replicated via ISR (in-sync replicas)
+- Simpler for append-only logs
+
+## Pattern 4: Cache + Database Layering
+
+**Principle**: Cache absorbs reads, database handles writes.
+
+```
+Read Path:
+Request → Cache check → Hit? Return : Query DB → Populate cache → Return
+
+Write Path:
+Request → Write to DB → Invalidate/Update cache → Return
+```
+
+**Variations**:
+- **Cache-aside**: Application manages cache explicitly
+- **Write-through**: Cache + DB updated atomically
+- **Write-behind**: Write to cache, async to DB
+
+**Trade-offs**:
+- Higher hit rate = lower DB load
+- Consistency complexity increases
+- Cold start problem (empty cache)
+
+# Trade-off Interactions
+
+## Latency Multiplication
+
+Each layer adds latency. For a distributed transaction:
+
+| Layer | Latency |
+|-------|---------|
+| Application | <1ms |
+| Cache check | 0.5-2ms |
+| Consensus (Raft) | 1-5ms |
+| Storage (RocksDB) | 1-5ms |
+| Cross-shard 2PC | +10-50ms |
+| **Total** | **15-100ms** |
+
+Compare to single-node PostgreSQL: **5-10ms**
+
+Distribution isn't free.
+
+## Write Amplification Stacking
+
+Each layer amplifies writes:
+
+| Source | Amplification |
+|--------|--------------|
+| WAL | 1× |
+| LSM compaction | 38× |
+| Replication (3×) | 3× |
+| **Total** | ~114× |
+
+A 1 KB write becomes 114 KB across the cluster.
+
+## Consistency vs. Performance
+
+Stronger consistency = more coordination:
+
+| Consistency | Coordination | Latency |
+|-------------|--------------|---------|
+| Eventual | None (async) | 1-5ms |
+| Causal | Vector clocks | 5-10ms |
+| Serializable | Raft + 2PC | 15-100ms |
+
+Choose based on requirements, not preference.
+
+# Anti-Patterns
+
+## Over-Layering
+
+**Problem**: Too many abstractions add latency and complexity.
+
+```
+Bad:
+App → Cache → API Gateway → Load Balancer → Service → ORM → Query Builder → DB
+
+Better:
+App → Cache → Service → DB (direct queries)
+```
+
+**Rule of thumb**: Each layer should provide 10× benefit to justify its cost.
+
+## Mismatched Primitives
+
+**Problem**: Using wrong primitive for workload.
+
+- B-tree for write-heavy logs → High write amplification
+- LSM-tree for point lookups → Read amplification
+- Consensus for eventually-consistent data → Unnecessary latency
+
+**Solution**: Match primitive to access pattern.
+
+## Ignoring Interaction Effects
+
+**Problem**: Optimizing one layer hurts another.
+
+**Example**: Aggressive caching + cache-aside pattern
+- Cache hit rate: 99%
+- Cache miss: DB query spike
+- Thundering herd on cache expiration
+
+**Solution**: Consider full system behavior, not layer in isolation.
+
+# Decision Framework
+
+## Choosing Primitives
+
+| Requirement | Storage | Distribution | Consistency |
+|-------------|---------|--------------|-------------|
+| Read-heavy OLTP | B-tree | Replication | Strong |
+| Write-heavy logs | LSM-tree | Partitioning | Eventual |
+| Global SQL | LSM-tree | Raft + sharding | Serializable |
+| High availability | LSM-tree | Masterless | Tunable |
+| Time-series | LSM-tree | Time-based sharding | Eventual |
+
+## Build vs. Buy
+
+| Scenario | Recommendation |
+|----------|---------------|
+| Standard OLTP | PostgreSQL (don't build) |
+| Event streaming | Kafka (don't build) |
+| Distributed SQL | CockroachDB/TiDB (don't build) |
+| Caching | Redis (don't build) |
+| Custom access patterns | Maybe build (but start with RocksDB) |
+
+**When to build custom**:
+1. 10× performance improvement possible
+2. 10× cost reduction possible
+3. Novel access patterns not served by existing systems
+4. Team has expertise to maintain
+
+**Cost of custom**:
+- 10-100× engineering effort to build
+- 5-50× operational cost to maintain
+- Must justify with equivalent benefit
+
+# Real-World Compositions
+
+## Kafka: Log + Partitions + Consumer Groups
+
+```
+Primitives:
+- Append-only log (per partition)
+- Hash/round-robin partitioning
+- Consumer groups (coordination)
+- ZooKeeper/KRaft (metadata consensus)
+
+Trade-offs achieved:
+- 1M+ messages/sec throughput
+- Ordered within partition
+- Horizontal scaling via partitions
+- Durability via replication
+```
+
+## Redis: Data Structures + Persistence + Replication
+
+```
+Primitives:
+- In-memory hash tables, skip lists, etc.
+- RDB snapshots / AOF log
+- Master-replica replication
+- Redis Cluster (hash slots)
+
+Trade-offs achieved:
+- Sub-millisecond latency
+- Rich data structures
+- Optional durability
+- Horizontal scaling (cluster mode)
+```
+
+## Elasticsearch: Inverted Index + Sharding + Replicas
+
+```
+Primitives:
+- Inverted index (Lucene segments)
+- Hash-based sharding
+- Replica shards for availability
+- Near-real-time refresh (1 second)
+
+Trade-offs achieved:
+- Full-text search at scale
+- Horizontal scaling
+- High availability
+- Trade-off: Eventual consistency, high memory
+```
+
+# Conclusion: Composition as Architecture
+
+System design is composition. Every real system combines primitives:
+
+- **Storage**: Index structure + durability log + cache
+- **Distribution**: Partitioning + replication + coordination
+- **Performance**: Caching + tiering + batching
+
+The art is understanding how primitives interact:
+- Trade-offs multiply across layers
+- Latency accumulates through the stack
+- Consistency requirements propagate upward
+
+In the following chapters, we'll apply these principles to concrete case studies: building a key-value store, a time-series database, and a distributed queue from first principles.
+
+---
+
+*Next: Case Study — Building a Key-Value Store*
