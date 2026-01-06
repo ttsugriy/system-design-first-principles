@@ -227,12 +227,13 @@ WHERE city = 'San Francisco'
   AND job = 'Software Engineer'
 ```
 
-Traditional: Assume city and job are independent
-  → P(SF) × P(SWE) = 0.01 × 0.05 = 0.0005
+**Traditional estimate** (assuming independence):
 
-Reality: SF has many software engineers
-  → Actual selectivity = 0.01 (20x underestimate!)
-```
+- P(SF) × P(SWE) = 0.01 × 0.05 = 0.0005
+
+**Reality** (SF has many software engineers):
+
+- Actual selectivity = 0.01 → **20× underestimate!**
 
 This leads to catastrophically bad query plans.
 

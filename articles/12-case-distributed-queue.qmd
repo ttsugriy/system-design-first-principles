@@ -580,4 +580,4 @@ Understanding these trade-offs lets you choose the right system—and configure 
 
 *Part III: Composition — Complete*
 
-*Next: Part IV — The AI Era (Future)*
+*Next: Part IV — The AI Era*
