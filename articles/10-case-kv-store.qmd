@@ -1,0 +1,545 @@
+---
+title: "Case Study: Building a Key-Value Store"
+subtitle: "From Single Node to Distributed"
+author: "Taras Tsugrii"
+date: today
+bibliography: ../references.bib
+---
+
+# The Problem
+
+Build a key-value store. The simplest useful distributed system.
+
+**API**:
+```
+PUT(key, value)  → Store value at key
+GET(key)         → Retrieve value for key
+DELETE(key)      → Remove key and value
+```
+
+That's it. No complex queries, no joins, no transactions. Just keys and values.
+
+Yet this "simple" problem requires every primitive we've studied: storage engines, durability, replication, partitioning, consistency, caching. By building a key-value store step-by-step, we'll see how primitives compose into a real system.
+
+# Requirements
+
+Before designing, let's understand what we're building.
+
+## Functional Requirements
+- Store and retrieve arbitrary key-value pairs
+- Keys: Up to 1 KB
+- Values: Up to 1 MB
+- Optional: TTL (time-to-live) for automatic expiration
+- Optional: CAS (compare-and-swap) for atomic updates
+
+## Non-Functional Requirements
+Let's target a realistic production system:
+
+| Requirement | Target |
+|-------------|--------|
+| Read latency (P99) | <10 ms |
+| Write latency (P99) | <20 ms |
+| Throughput | 100K ops/sec |
+| Durability | No data loss on single node failure |
+| Availability | 99.9% (8.7 hours downtime/year) |
+| Storage | 1 TB of data |
+
+## Scale Estimation
+- 1 TB data / 1 KB average record = 1 billion keys
+- 100K ops/sec × 86,400 sec/day = 8.6 billion operations/day
+- At 1 KB average: 100 MB/sec throughput
+
+# Stage 1: Single-Node Design
+
+Start simple. A single server. Get the primitives right.
+
+## Storage Engine Choice
+
+Three options:
+
+| Option | Reads | Writes | Use Case |
+|--------|-------|--------|----------|
+| Hash table | O(1) | O(1) | In-memory, no range queries |
+| B-tree | O(log n) | O(log n) | Read-heavy, range queries |
+| LSM-tree | O(log n) | O(1) amortized | Write-heavy |
+
+For a general-purpose key-value store with balanced read/write workload, an **LSM-tree** provides the best trade-off. It's what DynamoDB, Cassandra, and RocksDB use.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Single-Node KV Store                     │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────────────────────────────────────────────────┐│
+│  │                    API Layer                            ││
+│  │        GET | PUT | DELETE | (TTL, CAS)                  ││
+│  └────────────────────────┬────────────────────────────────┘│
+│                           │                                 │
+│  ┌────────────────────────▼────────────────────────────────┐│
+│  │               Storage Engine (LSM-tree)                 ││
+│  │  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐  ││
+│  │  │   Memtable   │  │     WAL      │  │Bloom Filters  │  ││
+│  │  │  (Skip list) │  │  (Durability)│  │(Skip reads)   │  ││
+│  │  └──────┬───────┘  └──────────────┘  └───────────────┘  ││
+│  │         │ flush                                         ││
+│  │  ┌──────▼────────────────────────────────────────────┐  ││
+│  │  │           SSTables (Immutable, Sorted)            │  ││
+│  │  │   L0: [SST] [SST] [SST]                           │  ││
+│  │  │   L1: [────SST────] [────SST────]                 │  ││
+│  │  │   L2: [────────────SST────────────]               │  ││
+│  │  └───────────────────────────────────────────────────┘  ││
+│  └─────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Write Path
+
+```
+PUT("user:123", "{name: Alice}")
+    │
+    ▼
+1. Append to WAL (sequential disk write)
+    │
+    ▼
+2. Insert into memtable (in-memory skip list)
+    │
+    ▼
+3. Return success to client
+    │
+    ▼ (background, when memtable full)
+4. Flush memtable → SSTable (Level 0)
+    │
+    ▼ (background)
+5. Compaction: Merge SSTables across levels
+```
+
+**Latency**: 1-5ms (dominated by WAL fsync)
+**Throughput**: 50-100K writes/sec (with group commit)
+
+## Read Path
+
+```
+GET("user:123")
+    │
+    ▼
+1. Check memtable (most recent writes)
+    │ not found
+    ▼
+2. For each level (L0, L1, L2, ...):
+   a. Check bloom filter: "Does key exist?"
+   b. If "maybe": Binary search SSTable
+   c. If found: Return value
+    │
+    ▼
+3. Not found → Return null
+```
+
+**Latency**: 0.5-5ms (depending on cache hits)
+**Read amplification**: 1-3 disk reads worst case (bloom filters eliminate most)
+
+## Durability
+
+The WAL ensures durability:
+
+1. Every write appended to WAL before acknowledging
+2. WAL is sequential (fast even on HDD)
+3. On crash: Replay WAL to reconstruct memtable
+4. After flush: Truncate old WAL
+
+**Recovery time**: Seconds (replay last WAL segment)
+
+## Performance Numbers
+
+| Operation | Latency (P50) | Latency (P99) | Throughput |
+|-----------|--------------|---------------|------------|
+| Write | 1ms | 5ms | 100K/sec |
+| Read (cache hit) | 0.1ms | 1ms | 500K/sec |
+| Read (cache miss) | 2ms | 10ms | 50K/sec |
+
+This single-node design handles our requirements—but has a single point of failure.
+
+# Stage 2: Add Replication
+
+Single node works, but a disk failure loses everything. Add replication.
+
+## Replication Options
+
+| Strategy | Consistency | Latency | Complexity |
+|----------|-------------|---------|------------|
+| **Leader-follower (async)** | Eventual | Low | Low |
+| **Leader-follower (sync)** | Strong | Higher | Medium |
+| **Multi-leader** | Conflict resolution needed | Low | High |
+| **Leaderless (quorum)** | Tunable | Variable | Medium |
+
+For a balanced KV store, **leader-follower with sync replication** provides strong consistency without excessive complexity.
+
+## Architecture with Replication
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Replicated KV Store                       │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│        ┌─────────┐                                          │
+│        │ Client  │                                          │
+│        └────┬────┘                                          │
+│             │                                               │
+│             ▼                                               │
+│        ┌─────────┐       ┌─────────┐       ┌─────────┐     │
+│        │ Leader  │──────►│Follower │       │Follower │     │
+│        │ (writes)│       │   1     │       │   2     │     │
+│        └────┬────┘       └────┬────┘       └────┬────┘     │
+│             │                 │                 │           │
+│        ┌────▼────┐       ┌────▼────┐       ┌────▼────┐     │
+│        │   LSM   │       │   LSM   │       │   LSM   │     │
+│        │  Store  │       │  Store  │       │  Store  │     │
+│        └─────────┘       └─────────┘       └─────────┘     │
+│                                                             │
+│   Replication factor: 3                                     │
+│   Write quorum: 2 (majority)                                │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Write Path with Replication
+
+```
+PUT("user:123", value)
+    │
+    ▼
+1. Client sends to leader
+    │
+    ▼
+2. Leader appends to local WAL
+    │
+    ▼
+3. Leader sends to followers (parallel)
+    │
+    ├──► Follower 1: Append to WAL → Ack
+    ├──► Follower 2: Append to WAL → Ack
+    │
+    ▼
+4. Leader waits for quorum (2 of 3)
+    │
+    ▼
+5. Leader applies to memtable
+    │
+    ▼
+6. Return success to client
+```
+
+**Latency impact**: +1-3ms for replication (local datacenter)
+
+## Read Options
+
+**Option A: Read from leader only**
+- Always consistent
+- Leader bottleneck for reads
+
+**Option B: Read from any replica (stale reads)**
+- Scales read throughput
+- May return stale data
+
+**Option C: Read from leader with lease**
+- Leader maintains time-based lease
+- Can serve reads locally during lease
+- Consistent without quorum
+
+For strong consistency with read scaling, use **Option C** (leader lease).
+
+## Failover
+
+When leader fails:
+1. Followers detect missing heartbeats (timeout: 150-300ms)
+2. Election: Follower with most recent log wins
+3. New leader starts accepting writes
+4. Clients redirect to new leader
+
+**Failover time**: 0.5-2 seconds
+
+## Trade-offs
+
+| Metric | Single Node | With Replication |
+|--------|-------------|------------------|
+| Write latency | 1-5ms | 3-10ms |
+| Durability | Disk failure = data loss | Survives 1 node failure |
+| Availability | Single point of failure | 99.9%+ |
+| Storage cost | 1× | 3× (replication factor) |
+
+# Stage 3: Add Partitioning
+
+1 TB on one node is fine. 100 TB is not. Add partitioning.
+
+## Partitioning Strategy
+
+**Hash partitioning** (consistent hashing):
+- Key → hash → partition
+- Even distribution
+- No range queries
+
+```
+Hash Ring:
+         0
+         │
+    P0───┼───P1
+         │
+    P3───┼───P2
+         │
+       2^32
+
+key "user:123" → hash → 0x7F3B... → Partition P1
+```
+
+## Architecture with Partitioning
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                 Partitioned KV Store                        │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│   ┌────────────┐                                            │
+│   │   Client   │                                            │
+│   └──────┬─────┘                                            │
+│          │ hash(key) → partition                            │
+│          ▼                                                  │
+│   ┌────────────┐    ┌────────────┐    ┌────────────┐       │
+│   │ Partition 0│    │ Partition 1│    │ Partition 2│       │
+│   │ (0-42)     │    │ (43-85)    │    │ (86-127)   │       │
+│   ├────────────┤    ├────────────┤    ├────────────┤       │
+│   │ Leader     │    │ Leader     │    │ Leader     │       │
+│   │ Follower   │    │ Follower   │    │ Follower   │       │
+│   │ Follower   │    │ Follower   │    │ Follower   │       │
+│   └────────────┘    └────────────┘    └────────────┘       │
+│                                                             │
+│   Total: 3 partitions × 3 replicas = 9 nodes              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Request Routing
+
+**Option A: Client-side routing**
+- Client knows partition map
+- Direct connection to correct partition
+- Lowest latency
+
+**Option B: Proxy routing**
+- All requests through proxy
+- Client doesn't know topology
+- Simpler clients, extra hop
+
+**Option C: Gossip routing**
+- Any node can accept any request
+- Nodes route internally
+- Eventually consistent topology
+
+For performance, use **Option A** (client-side routing) with a partition map.
+
+## Rebalancing
+
+When adding/removing partitions:
+
+**Consistent hashing** minimizes data movement:
+- Add node: ~1/N of data moves to new node
+- Remove node: ~1/N of data redistributed
+
+**Rebalancing process**:
+1. New node joins, takes over hash range
+2. Data copied from existing replicas
+3. Partition map updated (atomic)
+4. Old data garbage collected
+
+## Scaling Numbers
+
+| Partitions | Storage | Throughput |
+|------------|---------|------------|
+| 1 | 1 TB | 100K ops/sec |
+| 10 | 10 TB | 1M ops/sec |
+| 100 | 100 TB | 10M ops/sec |
+
+Linear scaling with partitions (assuming no hot keys).
+
+# Stage 4: Production Features
+
+A real system needs more.
+
+## TTL (Time-To-Live)
+
+```
+PUT("session:abc", data, ttl=3600)  # Expires in 1 hour
+```
+
+**Implementation**:
+1. Store expiration timestamp with value
+2. On read: Check if expired → return null
+3. Background: Scan and delete expired keys
+
+**Storage overhead**: 8 bytes per key (timestamp)
+
+## Hot Key Handling
+
+Some keys get disproportionate traffic ("celebrity problem").
+
+**Solution: Key-level caching**
+```
+┌──────────────┐
+│   L1 Cache   │ ← In-process, sub-ms
+│ (hot keys)   │
+└──────┬───────┘
+       │ miss
+       ▼
+┌──────────────┐
+│   L2 Cache   │ ← Distributed cache, 1-2ms
+│   (Redis)    │
+└──────┬───────┘
+       │ miss
+       ▼
+┌──────────────┐
+│  KV Store    │ ← Our system, 5-10ms
+└──────────────┘
+```
+
+**Hot key detection**: Track access counts, promote to cache.
+
+## Large Values
+
+Values >1 MB need special handling.
+
+**Solution: Value chunking**
+```
+PUT("large:key", 10MB_value)
+    │
+    ▼
+Split into 1 MB chunks:
+  chunk:0 → partition A
+  chunk:1 → partition B
+  chunk:2 → partition A
+    │
+    ▼
+Store metadata:
+  large:key → {chunks: 10, ids: [...]}
+```
+
+**Trade-off**: Adds latency for large values (multiple round trips).
+
+## Consistency Levels
+
+Tunable consistency (like Cassandra/DynamoDB):
+
+| Level | Behavior | Latency | Consistency |
+|-------|----------|---------|-------------|
+| **ONE** | Single replica ack | Lowest | Eventual |
+| **QUORUM** | Majority ack | Medium | Strong |
+| **ALL** | All replicas ack | Highest | Strongest |
+
+```
+PUT(key, value, consistency=QUORUM)
+GET(key, consistency=ONE)  # Faster but potentially stale
+```
+
+# Comparing to Real Systems
+
+## DynamoDB
+
+| Aspect | Our Design | DynamoDB |
+|--------|------------|----------|
+| Storage | LSM-tree | LSM-tree |
+| Partitioning | Consistent hashing | Consistent hashing |
+| Replication | Leader-follower | Multi-AZ replication |
+| Consistency | Tunable | Eventual (default), Strong (option) |
+| Unique | - | Auto-scaling, global tables |
+
+## Redis Cluster
+
+| Aspect | Our Design | Redis Cluster |
+|--------|------------|---------------|
+| Storage | LSM-tree (disk) | In-memory |
+| Partitioning | Consistent hashing | 16,384 hash slots |
+| Replication | Sync option | Async (default) |
+| Latency | 5-10ms | <1ms |
+| Capacity | TB scale | Memory-limited (GB) |
+
+## etcd
+
+| Aspect | Our Design | etcd |
+|--------|------------|------|
+| Storage | LSM-tree | B-tree |
+| Consensus | Leader-follower | Raft |
+| Consistency | Tunable | Linearizable only |
+| Scale | Horizontal | Single Raft group |
+| Use case | General KV | Coordination |
+
+# Final Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Distributed Key-Value Store                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   ┌─────────────────────────────────────────────────────────────────┐   │
+│   │                        Client Library                           │   │
+│   │   Partition map | Routing | Connection pooling | Retry logic    │   │
+│   └───────────────────────────────┬─────────────────────────────────┘   │
+│                                   │                                     │
+│   ┌───────────────────────────────▼─────────────────────────────────┐   │
+│   │                     Coordinator / Router                        │   │
+│   │        (Optional: for simpler clients or cross-partition ops)   │   │
+│   └───────────────────────────────┬─────────────────────────────────┘   │
+│                                   │                                     │
+│   ┌───────────────┬───────────────┼───────────────┬─────────────────┐   │
+│   │               │               │               │                 │   │
+│   ▼               ▼               ▼               ▼                 │   │
+│ ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐            │   │
+│ │Partition 0│ │Partition 1│ │Partition 2│ │Partition N│  ...       │   │
+│ ├───────────┤ ├───────────┤ ├───────────┤ ├───────────┤            │   │
+│ │  Leader   │ │  Leader   │ │  Leader   │ │  Leader   │            │   │
+│ │ Follower  │ │ Follower  │ │ Follower  │ │ Follower  │            │   │
+│ │ Follower  │ │ Follower  │ │ Follower  │ │ Follower  │            │   │
+│ └─────┬─────┘ └─────┬─────┘ └─────┬─────┘ └─────┬─────┘            │   │
+│       │             │             │             │                   │   │
+│ ┌─────▼─────┐ ┌─────▼─────┐ ┌─────▼─────┐ ┌─────▼─────┐            │   │
+│ │LSM Engine │ │LSM Engine │ │LSM Engine │ │LSM Engine │            │   │
+│ │(RocksDB)  │ │(RocksDB)  │ │(RocksDB)  │ │(RocksDB)  │            │   │
+│ └───────────┘ └───────────┘ └───────────┘ └───────────┘            │   │
+│                                                                     │   │
+│   Metadata Store (etcd/ZooKeeper): Partition map, leader election   │   │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Performance Summary
+
+| Metric | Target | Achieved |
+|--------|--------|----------|
+| Read latency (P99) | <10 ms | 5-10 ms |
+| Write latency (P99) | <20 ms | 10-15 ms |
+| Throughput | 100K ops/sec | 100K+ per partition |
+| Durability | Survive node failure | RF=3, quorum writes |
+| Availability | 99.9% | Automatic failover |
+| Storage | 1 TB | Scales with partitions |
+
+## Key Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Storage engine | LSM-tree | Balanced read/write |
+| Partitioning | Consistent hashing | Minimal rebalancing |
+| Replication | Leader-follower | Simple, proven |
+| Consistency | Tunable (default: quorum) | Flexibility |
+| Coordination | Separate metadata store | Well-understood (etcd) |
+
+# Conclusion
+
+Building a key-value store from first principles reveals how primitives compose:
+
+1. **Start with storage**: LSM-tree for balanced workloads
+2. **Add durability**: WAL ensures no data loss
+3. **Add availability**: Replication with quorum writes
+4. **Add scale**: Consistent hashing for partitioning
+5. **Add features**: TTL, consistency levels, hot key handling
+
+Each layer builds on the previous. Each adds capabilities—and complexity.
+
+The "simple" key-value store isn't simple. It's a composition of storage engines, consensus protocols, distributed coordination, and caching strategies. Understanding these components lets you reason about real systems: why DynamoDB behaves the way it does, why Redis is fast but memory-limited, why etcd prioritizes consistency over latency.
+
+---
+
+*Next: Case Study — Time-Series Database*
