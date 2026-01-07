@@ -1,0 +1,536 @@
+---
+title: "Networking Fundamentals"
+subtitle: "The Fabric Connecting Distributed Systems"
+author: "Taras Tsugrii"
+date: today
+bibliography: ../references.bib
+---
+
+# Why Networking Matters
+
+Every distributed system is fundamentally a network of communicating processes. Understanding networking isn't optional—it's foundational to understanding:
+
+- Why latency varies
+- How failures propagate
+- Where bottlenecks occur
+- What consistency guarantees are achievable
+
+This chapter covers the networking primitives that appear throughout system design.
+
+# The Network Stack
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Simplified Network Stack                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Layer 7: Application    HTTP, gRPC, WebSocket, DNS                      │
+│           ─────────────────────────────────────────────────              │
+│           What: Application protocols and data formats                   │
+│           Where: Your code interacts here                                │
+│                                                                          │
+│  Layer 4: Transport      TCP, UDP                                        │
+│           ─────────────────────────────────────────────────              │
+│           What: Reliable streams (TCP) or datagrams (UDP)                │
+│           Where: Connection management, flow control                     │
+│                                                                          │
+│  Layer 3: Network        IP                                              │
+│           ─────────────────────────────────────────────────              │
+│           What: Routing packets between hosts                            │
+│           Where: Addressing, routing decisions                           │
+│                                                                          │
+│  Layer 1-2: Physical/Link  Ethernet, WiFi                                │
+│           ─────────────────────────────────────────────────              │
+│           What: Physical transmission                                    │
+│           Where: Hardware, switches                                      │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+# DNS: The Internet's Phone Book
+
+Before any network communication, you need to resolve names to IP addresses.
+
+## How DNS Resolution Works
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      DNS Resolution Flow                                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Client: "What's the IP for api.example.com?"                            │
+│                                                                          │
+│  1. Check local cache (OS, browser)                                      │
+│     └─► Found? Return immediately (~0ms)                                 │
+│                                                                          │
+│  2. Query recursive resolver (ISP or 8.8.8.8)                            │
+│     └─► Resolver cache hit? Return (~1-5ms)                              │
+│                                                                          │
+│  3. Resolver queries authoritative servers:                              │
+│     a) Root server: "Who handles .com?"                                  │
+│     b) TLD server: "Who handles example.com?"                            │
+│     c) Authoritative: "api.example.com = 93.184.216.34"                  │
+│     └─► Full resolution: ~50-200ms                                       │
+│                                                                          │
+│  4. Cache result for TTL duration                                        │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## DNS Record Types
+
+| Record | Purpose | Example |
+|--------|---------|---------|
+| A | IPv4 address | `api.example.com → 93.184.216.34` |
+| AAAA | IPv6 address | `api.example.com → 2606:2800:220:1:...` |
+| CNAME | Alias to another name | `www.example.com → example.com` |
+| MX | Mail server | `example.com → mail.example.com` |
+| TXT | Arbitrary text | SPF, DKIM, domain verification |
+| SRV | Service location | `_http._tcp.example.com → port, host` |
+
+## DNS for Load Balancing
+
+DNS can distribute traffic across multiple servers:
+
+```
+api.example.com → 10.0.0.1 (weight: 50%)
+                → 10.0.0.2 (weight: 30%)
+                → 10.0.0.3 (weight: 20%)
+```
+
+**Limitations**:
+- TTL caching means slow failover
+- Clients may cache beyond TTL
+- No health checking (returns dead servers)
+- Limited load balancing algorithms
+
+**Best for**: Geographic distribution, simple round-robin
+
+## DNS Caching Trade-offs
+
+| TTL | Pros | Cons |
+|-----|------|------|
+| Short (60s) | Fast failover, quick updates | More DNS queries, higher latency |
+| Long (3600s) | Fewer queries, faster resolution | Slow failover, stale records |
+
+# TCP: Reliable Byte Streams
+
+TCP provides reliable, ordered delivery over unreliable networks.
+
+## Connection Establishment: Three-Way Handshake
+
+```
+Client                                Server
+   │                                     │
+   ├──── SYN (seq=100) ─────────────────►│
+   │     "I want to connect"             │
+   │                                     │
+   │◄─── SYN-ACK (seq=300, ack=101) ─────┤
+   │     "OK, I acknowledge"             │
+   │                                     │
+   ├──── ACK (ack=301) ─────────────────►│
+   │     "Connection established"        │
+   │                                     │
+   │◄────────── Data ───────────────────►│
+```
+
+**Cost**: 1 RTT before data transfer. For a 50ms RTT, that's 50ms of latency before any application data.
+
+## Connection Termination: Four-Way Handshake
+
+```
+Client                                Server
+   │                                     │
+   ├──── FIN ───────────────────────────►│
+   │◄─── ACK ────────────────────────────┤
+   │◄─── FIN ────────────────────────────┤
+   ├──── ACK ───────────────────────────►│
+   │                                     │
+   │     TIME_WAIT (2 × MSL)             │
+   │     (typically 60 seconds)          │
+```
+
+**TIME_WAIT**: The client holds the connection in TIME_WAIT to handle delayed packets. This can exhaust ports under high connection churn.
+
+## Flow Control and Congestion Control
+
+**Flow Control** (receiver-driven):
+- Receiver advertises how much data it can buffer
+- Prevents fast sender from overwhelming slow receiver
+
+**Congestion Control** (network-driven):
+- Sender probes network capacity
+- Backs off on packet loss
+- Algorithms: Reno, Cubic, BBR
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    TCP Congestion Window Growth                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Throughput                                                              │
+│      ▲                                                                   │
+│      │                    ┌────────────────                              │
+│      │                   /                                               │
+│      │                  /   Congestion avoidance                         │
+│      │                 /    (linear growth)                              │
+│      │               /                                                   │
+│      │             /                                                     │
+│      │           /                                                       │
+│      │         /   Slow start                                            │
+│      │       /     (exponential growth)                                  │
+│      │     /                                                             │
+│      │   /                                                               │
+│      │ /                                                                 │
+│      └────────────────────────────────────────────────► Time             │
+│                                                                          │
+│  Problem: New connections start slow. Short-lived connections never      │
+│           reach full throughput.                                         │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## TCP Performance Implications
+
+| Scenario | Impact | Mitigation |
+|----------|--------|------------|
+| High RTT (100ms+) | Slow congestion window growth | Connection pooling, HTTP/2 |
+| Packet loss | Throughput collapse | BBR congestion control |
+| Many short connections | Never reach full speed | Keep-alive, connection pooling |
+| High bandwidth-delay product | Need large windows | TCP window scaling |
+
+# HTTP: The Application Protocol
+
+## HTTP/1.1 Limitations
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    HTTP/1.1 Head-of-Line Blocking                        │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Single connection:                                                      │
+│                                                                          │
+│  Request 1 ──────────────────────► Response 1 (slow)                     │
+│                                         │                                │
+│                                         ▼                                │
+│  Request 2 ─────────────────────────────────────► Response 2             │
+│                                                        │                 │
+│                                                        ▼                 │
+│  Request 3 ────────────────────────────────────────────────► Response 3  │
+│                                                                          │
+│  Problem: Each request waits for the previous response.                  │
+│                                                                          │
+│  Workaround: Open 6 parallel connections (browser default).              │
+│              But: 6 × connection overhead, 6 × slow start.               │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## HTTP/2: Multiplexing
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    HTTP/2 Multiplexed Streams                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Single connection, multiple streams:                                    │
+│                                                                          │
+│  Stream 1: ████░░░░████░░░░████                                         │
+│  Stream 2: ░░████░░░░████░░░░██                                         │
+│  Stream 3: ░░░░████░░░░████░░░░                                         │
+│            ─────────────────────► Time                                   │
+│                                                                          │
+│  Benefits:                                                               │
+│  - One connection for all requests                                       │
+│  - No head-of-line blocking at HTTP layer                                │
+│  - Header compression (HPACK)                                            │
+│  - Server push                                                           │
+│                                                                          │
+│  Remaining problem: TCP head-of-line blocking                            │
+│  (packet loss blocks all streams)                                        │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## HTTP/3 and QUIC
+
+HTTP/3 replaces TCP with QUIC (UDP-based):
+
+| Feature | HTTP/2 (TCP) | HTTP/3 (QUIC) |
+|---------|-------------|---------------|
+| Transport | TCP | UDP |
+| Handshake | TCP + TLS (2-3 RTT) | 0-1 RTT |
+| Head-of-line blocking | At TCP layer | Per-stream only |
+| Connection migration | Breaks on IP change | Survives IP change |
+
+## Keep-Alive and Connection Pooling
+
+Reuse connections to avoid handshake overhead:
+
+```
+Without pooling:
+  Request 1: Connect (1 RTT) + TLS (1-2 RTT) + Request (1 RTT) = 3-4 RTT
+  Request 2: Connect (1 RTT) + TLS (1-2 RTT) + Request (1 RTT) = 3-4 RTT
+  Total: 6-8 RTT
+
+With pooling:
+  Request 1: Connect (1 RTT) + TLS (1-2 RTT) + Request (1 RTT) = 3-4 RTT
+  Request 2: Request (1 RTT) = 1 RTT  (reuse connection)
+  Total: 4-5 RTT
+```
+
+# Load Balancing
+
+Distribute traffic across multiple servers.
+
+## Layer 4 vs Layer 7
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                  L4 vs L7 Load Balancing                                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Layer 4 (Transport):                                                    │
+│  ─────────────────────                                                   │
+│  Decision based on: IP address, TCP port                                 │
+│  Cannot see: HTTP headers, URLs, cookies                                 │
+│  Performance: Very fast (kernel-level, millions of connections)          │
+│  Use case: TCP/UDP proxying, simple distribution                         │
+│                                                                          │
+│  Layer 7 (Application):                                                  │
+│  ─────────────────────                                                   │
+│  Decision based on: URL path, headers, cookies, body                     │
+│  Can see: Full HTTP request                                              │
+│  Performance: Slower (user-space, terminates connections)                │
+│  Use case: Content routing, A/B testing, authentication                  │
+│                                                                          │
+│  Example L7 routing:                                                     │
+│    /api/*     → API servers                                              │
+│    /static/*  → CDN                                                      │
+│    /admin/*   → Admin servers (with auth check)                          │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Load Balancing Algorithms
+
+| Algorithm | Description | Best For |
+|-----------|-------------|----------|
+| Round Robin | Rotate through servers | Homogeneous servers |
+| Weighted Round Robin | Rotate with weights | Heterogeneous capacity |
+| Least Connections | Send to least busy | Variable request duration |
+| IP Hash | Hash client IP to server | Session affinity |
+| Consistent Hashing | Minimal redistribution | Caching layers |
+| Random | Random selection | Large server pools |
+
+## Health Checks
+
+```
+Load Balancer                         Backend Servers
+      │                                 │  │  │
+      ├──── GET /health ───────────────►│  │  │
+      │◄─── 200 OK ─────────────────────│  │  │
+      │                                 │  │  │
+      ├──── GET /health ──────────────────►│  │
+      │◄─── 200 OK ────────────────────────│  │
+      │                                 │  │  │
+      ├──── GET /health ─────────────────────►│
+      │     (timeout - no response)           │
+      │                                 │  │  │
+      │     Mark server 3 unhealthy           │
+      │     Stop routing traffic to it        │
+```
+
+**Health check parameters**:
+- Interval: How often to check (5-30 seconds)
+- Timeout: Max wait for response (2-10 seconds)
+- Threshold: Failures before marking unhealthy (2-5)
+- Recovery: Successes before marking healthy (2-3)
+
+# CDN: Content Delivery Networks
+
+Cache content at edge locations close to users.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         CDN Architecture                                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│                            Origin Server                                 │
+│                          (your datacenter)                               │
+│                                 │                                        │
+│                                 │                                        │
+│              ┌──────────────────┼──────────────────┐                     │
+│              │                  │                  │                     │
+│              ▼                  ▼                  ▼                     │
+│        ┌─────────┐        ┌─────────┐        ┌─────────┐                │
+│        │  Edge   │        │  Edge   │        │  Edge   │                │
+│        │ (NYC)   │        │ (LON)   │        │ (TKY)   │                │
+│        └────┬────┘        └────┬────┘        └────┬────┘                │
+│             │                  │                  │                      │
+│        ┌────┴────┐        ┌────┴────┐        ┌────┴────┐                │
+│        │  Users  │        │  Users  │        │  Users  │                │
+│        │  (US)   │        │  (EU)   │        │ (Asia)  │                │
+│        └─────────┘        └─────────┘        └─────────┘                │
+│                                                                          │
+│  Without CDN: All users → Origin (100-300ms)                             │
+│  With CDN: Users → Nearest Edge (10-50ms)                                │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Cache-Control Headers
+
+| Directive | Meaning |
+|-----------|---------|
+| `max-age=3600` | Cache for 1 hour |
+| `no-cache` | Revalidate before using |
+| `no-store` | Never cache |
+| `private` | Only browser cache, not CDN |
+| `public` | CDN can cache |
+| `immutable` | Never changes (use with versioned URLs) |
+
+## CDN Cache Hit Ratio
+
+```
+Cache Hit Ratio = Cache Hits / (Cache Hits + Cache Misses)
+
+Factors affecting hit ratio:
+- Content popularity (Zipf distribution)
+- TTL settings
+- Cache size
+- URL structure (query params reduce hits)
+
+Typical targets:
+- Static assets: 95%+
+- Dynamic content: 50-80%
+- API responses: 30-60%
+```
+
+# WebSockets: Bidirectional Communication
+
+HTTP is request-response. WebSockets enable bidirectional streaming.
+
+## Handshake
+
+```
+Client                                 Server
+   │                                      │
+   ├──── HTTP Upgrade Request ───────────►│
+   │     Upgrade: websocket               │
+   │     Connection: Upgrade              │
+   │     Sec-WebSocket-Key: ...           │
+   │                                      │
+   │◄─── HTTP 101 Switching Protocols ────┤
+   │     Upgrade: websocket               │
+   │     Sec-WebSocket-Accept: ...        │
+   │                                      │
+   │◄────────── Full duplex ─────────────►│
+   │     (messages in both directions)    │
+```
+
+## WebSocket vs Alternatives
+
+| Method | Direction | Overhead | Latency | Use Case |
+|--------|-----------|----------|---------|----------|
+| Polling | Client → Server | High (repeated requests) | High (interval) | Legacy systems |
+| Long Polling | Server → Client | Medium | Medium | Notifications |
+| SSE | Server → Client | Low | Low | Event streams |
+| WebSocket | Bidirectional | Low | Low | Chat, gaming, real-time |
+
+# Network Latency Components
+
+Understanding where latency comes from:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Latency Breakdown                                     │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  1. DNS Resolution          0-200ms (cached: ~0ms)                       │
+│                                                                          │
+│  2. TCP Handshake           1 RTT                                        │
+│     └─► Same datacenter:    ~0.5ms                                       │
+│     └─► Same region:        ~10-30ms                                     │
+│     └─► Cross-continent:    ~100-200ms                                   │
+│                                                                          │
+│  3. TLS Handshake           1-2 RTT (TLS 1.3: 1 RTT, 0-RTT resumption)   │
+│                                                                          │
+│  4. Time to First Byte      Server processing time                       │
+│                                                                          │
+│  5. Content Transfer        Size / Bandwidth                             │
+│                                                                          │
+│  Example (cross-continent, 150ms RTT):                                   │
+│    DNS (cached):     0ms                                                 │
+│    TCP:              150ms                                               │
+│    TLS 1.3:          150ms                                               │
+│    TTFB:             50ms                                                │
+│    Transfer (10KB):  ~5ms                                                │
+│    ────────────────────────                                              │
+│    Total:            355ms                                               │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Speed of Light Limits
+
+Physical distance imposes hard latency floors:
+
+| Route | Distance | Theoretical Min | Typical RTT |
+|-------|----------|-----------------|-------------|
+| Same datacenter | <1 km | <0.01ms | 0.1-0.5ms |
+| Same region | ~1000 km | ~5ms | 10-30ms |
+| US East ↔ West | ~4000 km | ~20ms | 60-80ms |
+| US ↔ Europe | ~6000 km | ~30ms | 80-120ms |
+| US ↔ Asia | ~10000 km | ~50ms | 150-250ms |
+
+**Implication**: You cannot beat physics. To reduce latency, move computation closer to users (edge computing, CDN, regional deployments).
+
+# Exercises
+
+## Conceptual Questions
+
+1. **Protocol Selection**: For each use case, which protocol (HTTP/1.1, HTTP/2, HTTP/3, WebSocket, gRPC) would you choose?
+   - Streaming stock prices to a web dashboard
+   - Mobile app making 50 small API calls to load a screen
+   - Microservice-to-microservice communication in same datacenter
+   - Browser loading a webpage with 100 assets
+
+2. **DNS Trade-offs**: Your service is deployed in 3 regions. Explain the trade-offs of:
+   - Using DNS for geographic load balancing
+   - Using Anycast routing
+   - Using a global load balancer
+
+3. **Connection Pooling**: Why is connection pooling critical for services making many short requests? Calculate the overhead savings for 1000 requests with vs without pooling (assume 100ms RTT, TLS 1.3).
+
+## Quantitative Exercises
+
+4. **Latency Budget**: Your SLA requires P99 latency < 500ms for users worldwide. The server processing time is 100ms. Calculate:
+   - Maximum acceptable network RTT
+   - Which regions can you serve from a US East datacenter?
+   - Where would you need to add regional deployments?
+
+5. **CDN Sizing**: Your website serves:
+   - 10 million page views/day
+   - 50 assets per page (average 50KB each)
+   - 80% cache hit ratio
+
+   Calculate daily bandwidth from origin vs from CDN edge.
+
+## Design Exercises
+
+6. **Global API**: Design the networking architecture for a global API serving users in North America, Europe, and Asia with P99 < 200ms. Include:
+   - DNS strategy
+   - Load balancing approach
+   - CDN usage
+   - Regional deployment decisions
+
+7. **Real-Time Collaboration**: Design the networking layer for a real-time collaborative document editor (like Google Docs). Consider:
+   - Protocol choice
+   - Connection management
+   - Handling network partitions
+   - Latency requirements for "real-time" feel
+
+---
+
+*Next: Part II Deep-Dives or return to [Primitives](02-primitives.qmd)*

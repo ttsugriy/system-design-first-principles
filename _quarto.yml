@@ -43,6 +43,7 @@ book:
       chapters:
         - articles/19-resilience.qmd
         - articles/20-observability.qmd
+        - articles/21-networking.qmd
 
 format:
   html:

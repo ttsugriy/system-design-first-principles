@@ -643,4 +643,4 @@ Same `trace_id` across all three → click from metric to trace to log.
 
 ---
 
-*Part VI: Operational Patterns — Complete*
+*Next: [Networking Fundamentals — The Fabric Connecting Distributed Systems](21-networking.qmd)*
