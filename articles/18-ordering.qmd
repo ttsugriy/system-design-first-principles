@@ -1,0 +1,795 @@
+---
+title: "Ordering and Causality"
+subtitle: "Time in Distributed Systems"
+author: "Taras Tsugrii"
+date: today
+bibliography: ../references.bib
+---
+
+# The Problem with Time
+
+In a single computer, time is simple. Events happen in sequence. The CPU has a clock. "Before" and "after" are unambiguous.
+
+In a distributed system, everything breaks:
+
+- **Clock skew**: Different machines have different times (milliseconds to seconds)
+- **Clock drift**: Clocks run at different speeds
+- **Network delay**: Messages take variable time to arrive
+- **No global now**: There is no single "current time" across all nodes
+
+Yet we need ordering. When two users edit the same document, which edit came first? When a node fails and recovers, which writes were committed? When replicating data, what order should updates apply?
+
+This chapter explores how to reason about time without relying on physical clocks.
+
+# Happens-Before: The Foundation
+
+Leslie Lamport introduced the **happens-before** relation (→) in his seminal 1978 paper [@lamport1978time]. It captures causality—when one event could have influenced another.
+
+## Definition
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                       Happens-Before Relation                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Event A happens-before Event B (written A → B) if:                      │
+│                                                                          │
+│  1. Same process: A and B are in the same process, A comes before B      │
+│     in program order                                                     │
+│                                                                          │
+│  2. Message: A is the send of a message and B is the receipt of          │
+│     that same message                                                    │
+│                                                                          │
+│  3. Transitivity: There exists C such that A → C and C → B               │
+│                                                                          │
+│  ─────────────────────────────────────────────────────────────────────── │
+│                                                                          │
+│  If neither A → B nor B → A, then A and B are CONCURRENT (A ∥ B)         │
+│                                                                          │
+│  Concurrent means: neither could have caused the other.                  │
+│  They happened "at the same time" in the causal sense.                   │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Visual Example
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Happens-Before Example                                │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Time →                                                                  │
+│                                                                          │
+│  Process P:   [e1]─────────────[e2]────────────────────[e5]              │
+│                     \                                  /                 │
+│                      \                                /                  │
+│                       \──────msg─────────────────────/                   │
+│                                    \                /                    │
+│  Process Q:            [e3]─────────[e4]───────────                      │
+│                                                                          │
+│                                                                          │
+│  Happens-before relationships:                                           │
+│                                                                          │
+│    e1 → e2  (same process, program order)                                │
+│    e3 → e4  (same process, program order)                                │
+│    e2 → e4  (message: e2 sends, e4 receives)                             │
+│    e4 → e5  (message: e4 sends, e5 receives)                             │
+│                                                                          │
+│  By transitivity:                                                        │
+│    e1 → e4  (via e1 → e2 → e4)                                           │
+│    e1 → e5  (via e1 → e2 → e4 → e5)                                      │
+│    e2 → e5  (via e2 → e4 → e5)                                           │
+│    e3 → e5  (via e3 → e4 → e5)                                           │
+│                                                                          │
+│  Concurrent:                                                             │
+│    e1 ∥ e3  (neither could influence the other)                          │
+│    e2 ∥ e3  (neither could influence the other)                          │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Why This Matters
+
+Happens-before captures what we actually care about: **causality**.
+
+- If A → B, then A might have caused B. B could have been influenced by A.
+- If A ∥ B, they're independent. Neither could have caused the other.
+
+This is more useful than physical time because:
+1. It's based on information flow, not clocks
+2. It's consistent across all observers
+3. It's computable without synchronized clocks
+
+# Lamport Clocks: Capturing Order
+
+Lamport clocks assign a logical timestamp to each event, such that:
+
+$$A → B \implies L(A) < L(B)$$
+
+If A happens-before B, then A's timestamp is less than B's timestamp.
+
+## Algorithm
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      Lamport Clock Algorithm                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Each process maintains a counter: clock = 0                             │
+│                                                                          │
+│  On local event:                                                         │
+│    clock = clock + 1                                                     │
+│    timestamp event with clock                                            │
+│                                                                          │
+│  On send message:                                                        │
+│    clock = clock + 1                                                     │
+│    include clock in message                                              │
+│                                                                          │
+│  On receive message with timestamp T:                                    │
+│    clock = max(clock, T) + 1                                             │
+│    timestamp receive event with clock                                    │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Example
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Lamport Clock Example                                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Process P (clock starts at 0):                                          │
+│                                                                          │
+│    Event    Action                      Clock                            │
+│    ─────────────────────────────────────────────                         │
+│    p1       local event                 1                                │
+│    p2       send message to Q           2                                │
+│    p3       receive message from Q      5 (max(2,4)+1)                   │
+│                                                                          │
+│  Process Q (clock starts at 0):                                          │
+│                                                                          │
+│    Event    Action                      Clock                            │
+│    ─────────────────────────────────────────────                         │
+│    q1       local event                 1                                │
+│    q2       receive message from P      3 (max(1,2)+1)                   │
+│    q3       send message to P           4                                │
+│                                                                          │
+│                                                                          │
+│  Timeline:                                                               │
+│                                                                          │
+│  P:   [p1:1]────[p2:2]─────────────────────[p3:5]                        │
+│              \                            /                              │
+│               \──────────────────────────/                               │
+│                            \            /                                │
+│  Q:        [q1:1]────────[q2:3]────[q3:4]                                │
+│                                                                          │
+│                                                                          │
+│  Note: p1 and q1 both have timestamp 1, but they're concurrent.          │
+│  Lamport clocks don't distinguish concurrent events.                     │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Limitation: No Concurrency Detection
+
+Lamport clocks satisfy:
+$$A → B \implies L(A) < L(B)$$
+
+But the converse is NOT true:
+$$L(A) < L(B) \nRightarrow A → B$$
+
+If L(A) < L(B), we can't tell if A → B or A ∥ B.
+
+This matters for conflict detection: if two writes are concurrent, we need to detect that.
+
+# Vector Clocks: Capturing Causality
+
+Vector clocks, introduced independently by Fidge [@fidge1988timestamps] and Mattern [@mattern1989vector], extend Lamport clocks to detect concurrency:
+
+$$A → B \iff V(A) < V(B)$$
+
+If and only if—we can now tell causality from timestamps alone.
+
+## Algorithm
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     Vector Clock Algorithm                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  N processes, each maintains vector clock V[1..N]                        │
+│  Process i initializes: V[j] = 0 for all j                               │
+│                                                                          │
+│  On local event at process i:                                            │
+│    V[i] = V[i] + 1                                                       │
+│                                                                          │
+│  On send message at process i:                                           │
+│    V[i] = V[i] + 1                                                       │
+│    include V in message                                                  │
+│                                                                          │
+│  On receive message with vector V' at process i:                         │
+│    V[j] = max(V[j], V'[j]) for all j                                     │
+│    V[i] = V[i] + 1                                                       │
+│                                                                          │
+│  ─────────────────────────────────────────────────────────────────────── │
+│                                                                          │
+│  Comparison:                                                             │
+│    V1 < V2 if V1[j] ≤ V2[j] for all j AND V1 ≠ V2                        │
+│    V1 ∥ V2 if neither V1 < V2 nor V2 < V1                                │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Example
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Vector Clock Example                                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Three processes: P, Q, R                                                │
+│  Vector format: [P, Q, R]                                                │
+│                                                                          │
+│  P:   [1,0,0]────[2,0,0]──────────────────────[3,2,0]                    │
+│                      \                        /                          │
+│                       \──────msg─────────────/                           │
+│                             \               /                            │
+│  Q:        [0,1,0]────────[2,2,0]────[2,3,0]                             │
+│                              │                                           │
+│                              │                                           │
+│  R:             [0,0,1]──────│────[0,0,2]                                │
+│                              │                                           │
+│                         (no message)                                     │
+│                                                                          │
+│  Causality analysis:                                                     │
+│                                                                          │
+│    [2,0,0] < [2,2,0]?                                                    │
+│      Check: 2≤2, 0≤2, 0≤0 ✓ (all less or equal, not all equal)           │
+│      Yes: P's event → Q's event                                          │
+│                                                                          │
+│    [0,1,0] ∥ [0,0,1]?                                                    │
+│      Check [0,1,0] < [0,0,1]: 0≤0✓, 1≤0✗ → No                            │
+│      Check [0,0,1] < [0,1,0]: 0≤0✓, 0≤1✓, 1≤0✗ → No                      │
+│      Neither is less: Concurrent!                                        │
+│                                                                          │
+│    [0,0,2] ∥ [2,3,0]?                                                    │
+│      Check [0,0,2] < [2,3,0]: 0≤2✓, 0≤3✓, 2≤0✗ → No                      │
+│      Check [2,3,0] < [0,0,2]: 2≤0✗ → No                                  │
+│      Neither is less: Concurrent!                                        │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Vector Clocks in Practice
+
+| System | Vector Clock Usage |
+|--------|-------------------|
+| Dynamo/Riak | Conflict detection for replicas |
+| Voldemort | Version vectors for concurrent writes |
+| CRDTs | Operation ordering |
+
+**Trade-off**: Vector clocks grow with number of processes. For thousands of clients, this becomes impractical. Solutions include:
+- Limit to server nodes only (not clients)
+- Prune old entries
+- Use dotted version vectors (DVV)
+
+# Hybrid Logical Clocks (HLC)
+
+Physical clocks are convenient for humans and debugging. Logical clocks are correct for causality. **Hybrid Logical Clocks** combine both.
+
+## Design
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Hybrid Logical Clock                                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Each timestamp has two parts: (physical, logical)                       │
+│                                                                          │
+│    physical: Wall clock time (with some error)                           │
+│    logical:  Lamport-style counter                                       │
+│                                                                          │
+│  Comparison: First by physical, then by logical                          │
+│                                                                          │
+│  ─────────────────────────────────────────────────────────────────────── │
+│                                                                          │
+│  Algorithm:                                                              │
+│                                                                          │
+│  On local/send event:                                                    │
+│    pt = physical_time()                                                  │
+│    if pt > l.physical:                                                   │
+│      l.physical = pt                                                     │
+│      l.logical = 0                                                       │
+│    else:                                                                 │
+│      l.logical = l.logical + 1                                           │
+│                                                                          │
+│  On receive message with timestamp m:                                    │
+│    pt = physical_time()                                                  │
+│    if pt > l.physical and pt > m.physical:                               │
+│      l.physical = pt                                                     │
+│      l.logical = 0                                                       │
+│    else if l.physical > m.physical:                                      │
+│      l.logical = l.logical + 1                                           │
+│    else if m.physical > l.physical:                                      │
+│      l.physical = m.physical                                             │
+│      l.logical = m.logical + 1                                           │
+│    else:  # equal physical                                               │
+│      l.logical = max(l.logical, m.logical) + 1                           │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Benefits
+
+1. **Close to physical time**: HLC ≈ wall clock (within clock skew)
+2. **Causality preserved**: HLC respects happens-before
+3. **Fixed size**: Unlike vector clocks, constant space
+4. **Human readable**: Timestamps look like real times
+
+## HLC in Practice
+
+| System | Usage |
+|--------|-------|
+| CockroachDB | Transaction timestamps |
+| MongoDB | Oplog ordering |
+| Spanner | (Uses TrueTime, a different approach) |
+
+# Consistency Models and Ordering
+
+Different consistency models provide different ordering guarantees:
+
+## Linearizability (Strong Consistency)
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                       Linearizability                                    │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Guarantee: Operations appear to execute atomically at some point        │
+│  between their start and end times.                                      │
+│                                                                          │
+│  Real time:    ─────────────────────────────────────────────────►        │
+│                                                                          │
+│  Client 1:     [──── write(x=1) ────]                                    │
+│                                                                          │
+│  Client 2:              [──── read() ────]                               │
+│                                                                          │
+│  Client 3:                       [──── read() ────]                      │
+│                                                                          │
+│  Linearization point (where operation "takes effect"):                   │
+│                                                                          │
+│  Real time:    ─────────────────────────────────────────────────►        │
+│                          ●                                               │
+│                     write(x=1)                                           │
+│                                                                          │
+│  Result: If write completes before read starts, read must see x=1.       │
+│                                                                          │
+│  Cost: Requires coordination (consensus). High latency.                  │
+│        In Raft: Every read/write goes through leader.                    │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Sequential Consistency
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Sequential Consistency                                │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Guarantee: All processes see the same order of operations, and          │
+│  each process's operations appear in program order.                      │
+│                                                                          │
+│  Difference from linearizability:                                        │
+│    • No real-time constraint                                             │
+│    • Operations can appear to reorder in time                            │
+│    • Just needs a consistent global order                                │
+│                                                                          │
+│  Example (allowed under sequential, not under linearizable):             │
+│                                                                          │
+│  Process 1:  write(x=1) ──────────────────────                           │
+│  Process 2:  ──────────────────────── read(x) → 0                        │
+│                                                                          │
+│  Even though write "finished" before read, read can return old value     │
+│  if the global order has read before write.                              │
+│                                                                          │
+│  Cost: Still expensive. All processes must agree on order.               │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Causal Consistency
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      Causal Consistency                                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Guarantee: If A → B (A happened-before B), all processes see A          │
+│  before B. Concurrent operations can be seen in any order.               │
+│                                                                          │
+│  Example:                                                                │
+│                                                                          │
+│  Alice posts: "I got the job!"           (event A)                       │
+│  Bob sees Alice's post and comments:                                     │
+│    "Congratulations!"                    (event B, B depends on A)       │
+│                                                                          │
+│  Causally consistent: Everyone sees Alice's post before Bob's comment.  │
+│  Not causally consistent: Carol sees Bob's comment but not Alice's post.│
+│                                                                          │
+│  ─────────────────────────────────────────────────────────────────────── │
+│                                                                          │
+│  Implementation:                                                         │
+│    • Track dependencies (vector clocks or explicit)                      │
+│    • Don't show event until dependencies are visible                     │
+│                                                                          │
+│  Cost: Lower than linearizability. No global coordination.               │
+│        Can be implemented with vector clocks.                            │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Eventual Consistency
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     Eventual Consistency                                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Guarantee: If no new updates, eventually all replicas converge to       │
+│  the same value.                                                         │
+│                                                                          │
+│  What it DOESN'T guarantee:                                              │
+│    • When convergence happens (could be seconds or hours)                │
+│    • What order updates are seen                                         │
+│    • That reads after writes are consistent                              │
+│                                                                          │
+│  Example:                                                                │
+│                                                                          │
+│  Replica 1:  x=1 ────────────────────────────────► x=3                   │
+│                      \                            /                      │
+│                       \──── replication ─────────/                       │
+│                              (eventually)                                │
+│  Replica 2:  x=0 ────────────────────────────────► x=3                   │
+│                                                                          │
+│  During replication, reads may return 0 or 1 or 3 depending on replica.  │
+│                                                                          │
+│  Cost: Lowest. No coordination required. Best availability.              │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Comparison
+
+| Model | Ordering Guarantee | Coordination Required | Typical Latency |
+|-------|-------------------|----------------------|-----------------|
+| Linearizable | Real-time order | Consensus | High (50-200ms) |
+| Sequential | Global order | Total order broadcast | High |
+| Causal | Causal order | Vector clocks | Medium |
+| Eventual | Eventually same | None | Low (<10ms) |
+
+# Conflict Resolution
+
+When concurrent updates happen, how do we resolve them?
+
+## Last-Writer-Wins (LWW)
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      Last-Writer-Wins                                    │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Rule: The write with the highest timestamp wins.                        │
+│                                                                          │
+│  Client A: write(x=1, ts=100)                                            │
+│  Client B: write(x=2, ts=102)  ← Higher timestamp, this wins             │
+│                                                                          │
+│  Final value: x=2                                                        │
+│                                                                          │
+│  Problem: Data loss. Client A's write is silently dropped.               │
+│                                                                          │
+│  Mitigation: Use for data where "latest wins" makes sense:               │
+│    • User's current location                                             │
+│    • Latest sensor reading                                               │
+│    • Cache values                                                        │
+│                                                                          │
+│  Avoid for: Shopping carts, documents, anything where updates matter.    │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Multi-Value (Siblings)
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Multi-Value (Siblings)                                │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Rule: If writes are concurrent, keep all values. Let application        │
+│  resolve.                                                                │
+│                                                                          │
+│  Client A: write(x=1) with vector clock [A:1, B:0]                       │
+│  Client B: write(x=2) with vector clock [A:0, B:1]                       │
+│                                                                          │
+│  These are concurrent (neither clock dominates).                         │
+│                                                                          │
+│  Storage: x = { [A:1,B:0]: 1, [A:0,B:1]: 2 }  (siblings)                 │
+│                                                                          │
+│  On read: Return both values, client must merge.                         │
+│                                                                          │
+│  Example: Shopping cart                                                  │
+│    • Client A adds item X                                                │
+│    • Client B adds item Y                                                │
+│    • Conflict! Both additions are valid.                                 │
+│    • Resolution: Union of items = {X, Y}                                 │
+│                                                                          │
+│  Used by: Riak, Dynamo (optionally)                                      │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## CRDTs (Conflict-free Replicated Data Types)
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           CRDTs                                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Rule: Design data structures that automatically merge without conflict. │
+│                                                                          │
+│  Example: G-Counter (Grow-only counter)                                  │
+│  ─────────────────────────────────────                                   │
+│                                                                          │
+│  State: Map from node ID to count                                        │
+│    Node A: {A: 5, B: 0}                                                  │
+│    Node B: {A: 3, B: 7}                                                  │
+│                                                                          │
+│  Merge: Take max of each entry                                           │
+│    Result: {A: 5, B: 7}                                                  │
+│                                                                          │
+│  Value: Sum of all entries = 12                                          │
+│                                                                          │
+│  ─────────────────────────────────────────────────────────────────────── │
+│                                                                          │
+│  Example: LWW-Register (Last-Writer-Wins Register)                       │
+│  ─────────────────────────────────────────────────                       │
+│                                                                          │
+│  State: (value, timestamp)                                               │
+│    Node A: ("alice", 100)                                                │
+│    Node B: ("bob", 105)                                                  │
+│                                                                          │
+│  Merge: Take entry with higher timestamp                                 │
+│    Result: ("bob", 105)                                                  │
+│                                                                          │
+│  ─────────────────────────────────────────────────────────────────────── │
+│                                                                          │
+│  Example: OR-Set (Observed-Remove Set)                                   │
+│  ─────────────────────────────────────                                   │
+│                                                                          │
+│  Problem: With regular sets, add(x) and remove(x) conflict.              │
+│  Solution: Tag each element with unique ID.                              │
+│                                                                          │
+│  Add(x): Add (x, unique_id) to set                                       │
+│  Remove(x): Remove all (x, *) pairs you've seen                          │
+│  Merge: Union of all pairs                                               │
+│                                                                          │
+│  Property: Add after concurrent remove wins.                             │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## CRDT Trade-offs
+
+| CRDT Type | Conflict Resolution | Use Case |
+|-----------|---------------------|----------|
+| G-Counter | Sum of increments | View counts, likes |
+| PN-Counter | Separate inc/dec counters | Inventory (add/remove) |
+| LWW-Register | Latest timestamp wins | User profile fields |
+| OR-Set | Add wins over concurrent remove | Tags, shopping cart |
+| LWW-Map | LWW per key | User preferences |
+| RGA | Ordered list with unique IDs | Collaborative text editing |
+
+# Ordering in Real Systems
+
+## Kafka: Partition Ordering
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Kafka Ordering Guarantees                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Within a partition: Total order (offset 0, 1, 2, ...)                   │
+│  Across partitions: No ordering guarantee                                │
+│                                                                          │
+│  Partition 0:  [msg0] [msg1] [msg2] [msg3] ...                           │
+│                   ↓ ordered                                              │
+│                                                                          │
+│  Partition 1:  [msg0] [msg1] [msg2] ...                                  │
+│                   ↓ ordered (within partition)                           │
+│                                                                          │
+│  ─────────────────────────────────────────────────────────────────────── │
+│                                                                          │
+│  Strategy: Partition by entity ID                                        │
+│                                                                          │
+│    Hash(user_id) → partition                                             │
+│                                                                          │
+│    All events for user_123 go to same partition.                         │
+│    User_123's events are totally ordered.                                │
+│    User_123 and user_456 events have no order.                           │
+│                                                                          │
+│  This matches causality: Events for different users are independent.     │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Spanner: TrueTime
+
+Google Spanner uses GPS and atomic clocks to bound clock uncertainty:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         TrueTime                                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  TrueTime API returns an interval: [earliest, latest]                    │
+│                                                                          │
+│  TT.now() → [t - ε, t + ε]   where ε ≈ 7ms typically                     │
+│                                                                          │
+│  Guarantee: Actual time is within that interval.                         │
+│                                                                          │
+│  ─────────────────────────────────────────────────────────────────────── │
+│                                                                          │
+│  Commit protocol:                                                        │
+│                                                                          │
+│  1. Acquire locks, assign timestamp ts                                   │
+│  2. Wait until TT.now().earliest > ts ("commit wait")                    │
+│  3. Now safe: ts is definitely in the past                               │
+│  4. Release locks                                                        │
+│                                                                          │
+│  Consequence: Any transaction that starts after commit sees the write.   │
+│               External consistency without full coordination!            │
+│                                                                          │
+│  Cost:                                                                   │
+│    • Requires specialized hardware (GPS, atomic clocks)                  │
+│    • Commit wait adds ~7ms latency                                       │
+│    • Only Google has this at scale (cloud offering)                      │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## CockroachDB: HLC + Uncertainty
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                 CockroachDB Ordering                                     │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Uses Hybrid Logical Clocks (HLC) with uncertainty interval.             │
+│                                                                          │
+│  When reading:                                                           │
+│    1. Read with timestamp T                                              │
+│    2. If encounter value with timestamp in (T, T + max_offset]:          │
+│       - Uncertainty! Value might be from future or past.                 │
+│       - Restart transaction with higher timestamp.                       │
+│                                                                          │
+│  max_offset: Maximum expected clock skew (250ms default)                 │
+│                                                                          │
+│  Trade-off:                                                              │
+│    • Works on commodity hardware (no GPS)                                │
+│    • Higher latency under clock skew                                     │
+│    • Restarts when uncertainty encountered                               │
+│                                                                          │
+│  Practical impact:                                                       │
+│    • Keep nodes' clocks synchronized (NTP)                               │
+│    • Lower max_offset = better performance, requires tighter sync        │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+# Trade-off Summary
+
+## Clock Types
+
+| Clock Type | Space | Causality Detection | Physical Time | Best For |
+|------------|-------|---------------------|---------------|----------|
+| Lamport | O(1) | No | No | Simple ordering |
+| Vector | O(n) | Yes | No | Conflict detection |
+| HLC | O(1) | Partial | Approximate | General purpose |
+| TrueTime | O(1) | Yes | Bounded | External consistency |
+
+## Consistency vs. Performance
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│               Consistency-Performance Trade-off                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Strong                                                        Weak      │
+│    │                                                             │       │
+│    ▼                                                             ▼       │
+│                                                                          │
+│  Linearizable    Sequential    Causal    Session    Eventual            │
+│       │              │           │          │          │                 │
+│       ▼              ▼           ▼          ▼          ▼                 │
+│   Highest        High        Medium      Low       Lowest               │
+│   latency       latency     latency    latency    latency               │
+│                                                                          │
+│  Choose based on:                                                        │
+│    • Business requirements (bank = strong, social = weak)                │
+│    • Geographic distribution (cross-DC = expensive strong)               │
+│    • Read/write ratio (read-heavy can use weaker)                        │
+│    • Conflict likelihood (high = need detection)                         │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+# Conclusion
+
+Time and ordering in distributed systems require fundamental rethinking:
+
+1. **Physical clocks are unreliable**: Don't depend on wall-clock time for correctness
+2. **Happens-before captures causality**: The meaningful ordering relationship
+3. **Logical clocks encode order**: Lamport for simple, vector for causality detection
+4. **Consistency is a spectrum**: Choose the level that fits your requirements
+5. **Conflicts are inevitable**: Design data structures that merge gracefully (CRDTs)
+
+Combined with events (Chapter 15) and state machines (Chapter 16), ordering completes the temporal model:
+
+- **Events**: What happened
+- **State machines**: What can happen next
+- **Ordering**: When things happened relative to each other
+
+This temporal perspective is orthogonal to the spatial perspective (services, databases) covered in earlier parts—and equally important for building correct distributed systems.
+
+# Exercises
+
+## Conceptual Questions
+
+1. **Happens-Before**: Given these events and messages:
+   - P1: e1, send to P2, e3
+   - P2: receive from P1, e2, send to P3
+   - P3: e4, receive from P2
+
+   Identify all happens-before relationships. Which events are concurrent?
+
+2. **Lamport vs Vector**: A system uses Lamport clocks. Event A has timestamp 5, event B has timestamp 7. Can you determine if A → B? What if you used vector clocks?
+
+3. **Consistency Choice**: For each application, recommend a consistency level (linearizable, causal, eventual) and justify:
+   - a) Bank account balance
+   - b) Social media likes count
+   - c) Collaborative document editing
+   - d) DNS records
+   - e) Shopping cart
+
+## Design Exercises
+
+4. **Causal Broadcast**: Design a causal broadcast protocol where messages are only delivered after all causally prior messages. Use vector clocks. What happens if a message is lost?
+
+5. **Session Consistency**: A user expects read-your-writes consistency within their session. Design a system that provides this over eventually consistent replicas. Hint: track what each session has written.
+
+6. **CRDT Shopping Cart**: Design a CRDT for a shopping cart that supports:
+   - Add item (with quantity)
+   - Remove item
+   - Change quantity
+
+   How do you handle concurrent add and remove of the same item? What about concurrent quantity changes?
+
+## Analysis Exercises
+
+7. **Clock Skew Impact**: A distributed database has 3 nodes with clock skew of ±10ms. Using HLC with uncertainty windows:
+   - What's the maximum uncertainty interval?
+   - If transactions average 5ms, what percentage might need restarts due to uncertainty?
+   - How does reducing skew to ±1ms change this?
+
+8. **Vector Clock Overhead**: A system has 100 nodes using vector clocks. Each event adds 100 integers (8 bytes each) to messages. If there are 10,000 events/second:
+   - What's the bandwidth overhead for vector clocks?
+   - At what node count does this become >10% of a 1Gbps link?
+   - Propose an optimization and analyze its trade-offs.
+
+---
+
+*Part V: Temporal Patterns — Complete*
+
+*Continue to [Part VI: Operational Patterns](19-resilience.qmd) — resilience, observability, and running systems in production*

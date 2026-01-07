@@ -688,8 +688,69 @@ System design remains a deeply human endeavor—understanding requirements, maki
 
 The periodic table of data structures is expanding. The design space is being mapped. And the systems of tomorrow will help design themselves—guided by the principles we've explored in this book.
 
+# Exercises
+
+## Conceptual Questions
+
+1. **Design Space Size**: For a simple key-value store with:
+   - 3 storage engine options (B-tree, LSM, hash)
+   - 4 compaction strategies
+   - 5 bloom filter configurations (bits per key: 5, 10, 15, 20, none)
+   - 3 replication strategies
+   - 4 consistency levels
+   - Continuous parameters: memtable size (10 options), level ratio (5 options)
+
+   Calculate the discrete configuration space size. Why is exhaustive search impractical even for this "simple" system?
+
+2. **Workload Characterization**: List the key dimensions needed to characterize a database workload for automated design. For each dimension, explain how it influences primitive selection (e.g., read/write ratio → B-tree vs LSM-tree).
+
+3. **Stability vs. Adaptation**: A self-tuning system detects that the workload has shifted and recommends changing the compaction strategy. However, changing compaction strategy requires rewriting all data (hours of work). How should the system decide whether to adapt? What factors should influence the decision?
+
+## Design Exercises
+
+4. **Self-Designing Cache**: Design a cache that automatically adjusts:
+   - Eviction policy (LRU, LFU, or hybrid)
+   - Cache size allocation across data types
+   - TTL values per key pattern
+
+   Specify: What metrics would you collect? How would the system detect that a change is needed? What prevents oscillation?
+
+5. **Workload Predictor**: Design a workload prediction system that:
+   - Observes query patterns over time
+   - Predicts workload changes (e.g., month-end batch jobs, holiday traffic)
+   - Pre-configures the database before workload shifts
+
+   What features would you extract from the query stream? What model architecture would you use? How would you handle novel workload patterns not seen in training?
+
+6. **Safe Autonomous Operations**: Design a governance framework for a self-designing database in a financial services company. Define:
+   - What changes can be made automatically (no human approval)
+   - What changes require human approval
+   - What changes are prohibited for automation
+   - How to audit and roll back automated changes
+
+## Analysis Exercises
+
+7. **Pareto Frontier Analysis**: Consider three database configurations:
+   - Config A: Read latency 5ms, Write latency 20ms, Space 1x
+   - Config B: Read latency 10ms, Write latency 5ms, Space 1.5x
+   - Config C: Read latency 8ms, Write latency 15ms, Space 1.2x
+
+   Which configurations are on the Pareto frontier? Which is dominated? For a workload with 70% reads, 30% writes, and storage cost $0.10/GB, which configuration has the lowest total cost (assuming 1TB data and 1M queries/day)?
+
+8. **Online Learning Trade-offs**: A self-tuning system can either:
+   - Option A: Explore aggressively (try 10 new configurations/day), potentially causing performance variance
+   - Option B: Explore conservatively (try 1 new configuration/week), slower to find optimal
+
+   For a system with SLA of P99 < 100ms (currently at P99 = 50ms), which exploration strategy is safer? How would you modify the exploration rate based on current performance headroom?
+
+## Research Questions
+
+9. **Future of System Design**: Given the trajectory from manual tuning → auto-tuning → self-designing systems, what role will human system designers play in 10 years? What skills will remain valuable?
+
+10. **Verification Challenge**: A self-designing system synthesizes a new index structure optimized for your specific workload. How would you verify that this novel structure is correct (returns right answers) and won't cause data corruption? What testing approach would give you confidence to deploy?
+
 ---
 
 *Part IV: The AI Era — Complete*
 
-*System Design from First Principles — The End*
+*Continue to [Part V: Temporal Patterns](16-events.qmd) — exploring events, state machines, and ordering*

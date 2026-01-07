@@ -1,0 +1,863 @@
+---
+title: "State Machines for System Design"
+subtitle: "Making Behavior Explicit"
+author: "Taras Tsugrii"
+date: today
+bibliography: ../references.bib
+---
+
+# The Hidden State Machines
+
+Every non-trivial system has state. And that state changes over time according to rules.
+
+Consider a simple order:
+
+- An order starts as PENDING
+- When paid, it becomes CONFIRMED
+- When shipped, it becomes SHIPPED
+- When delivered, it becomes DELIVERED
+
+This isn't just data—it's a **state machine**. The order can only transition through specific states in specific ways. You can't ship an order before it's confirmed. You can't mark it delivered before it's shipped.
+
+Yet most system design resources show databases and services without making these state machines explicit. The result: bugs, race conditions, and systems that allow impossible states.
+
+# What Is a State Machine?
+
+A **finite state machine (FSM)** is a model of computation with:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     State Machine Components                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  1. States: Distinct configurations the system can be in                 │
+│     ────────────────────────────────────────────────                     │
+│     Examples: PENDING, CONFIRMED, SHIPPED, DELIVERED                     │
+│                                                                          │
+│  2. Events (Triggers): Things that can cause state changes               │
+│     ───────────────────────────────────────────────────                  │
+│     Examples: PaymentReceived, ShipmentDispatched, DeliveryConfirmed     │
+│                                                                          │
+│  3. Transitions: Rules for moving between states                         │
+│     ────────────────────────────────────────────                         │
+│     PENDING + PaymentReceived → CONFIRMED                                │
+│     CONFIRMED + ShipmentDispatched → SHIPPED                             │
+│                                                                          │
+│  4. Guards: Conditions that must be true for transition                  │
+│     ───────────────────────────────────────────────                      │
+│     ShipmentDispatched only if inventory.allocated = true                │
+│                                                                          │
+│  5. Actions: Side effects executed during transition                     │
+│     ────────────────────────────────────────────────                     │
+│     On entering SHIPPED: send notification, update tracking              │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Visual Representation
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Order State Machine                                   │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│                           ┌───────────┐                                  │
+│                           │  PENDING  │                                  │
+│                           └─────┬─────┘                                  │
+│                                 │                                        │
+│                                 │ PaymentReceived                        │
+│                                 │ [payment.valid]                        │
+│                                 │ / sendConfirmationEmail()              │
+│                                 ▼                                        │
+│    ┌───────────┐          ┌───────────┐                                  │
+│    │ CANCELLED │◄─────────│ CONFIRMED │                                  │
+│    └───────────┘  Cancel  └─────┬─────┘                                  │
+│                  [refundable]   │                                        │
+│                                 │ ShipmentDispatched                     │
+│                                 │ [inventory.allocated]                  │
+│                                 │ / updateTracking()                     │
+│                                 ▼                                        │
+│                           ┌───────────┐                                  │
+│                           │  SHIPPED  │                                  │
+│                           └─────┬─────┘                                  │
+│                                 │                                        │
+│                                 │ DeliveryConfirmed                      │
+│                                 │ / sendSurvey()                         │
+│                                 ▼                                        │
+│                           ┌───────────┐                                  │
+│                           │ DELIVERED │                                  │
+│                           └───────────┘                                  │
+│                                                                          │
+│  Notation:                                                               │
+│    Event [guard] / action                                                │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+# Why State Machines Matter
+
+## 1. They Prevent Impossible States
+
+Without explicit state machines:
+
+```python
+# Bug-prone code
+order.status = "SHIPPED"
+order.shipped_at = datetime.now()
+# What if order wasn't confirmed? No check!
+```
+
+With explicit state machines:
+
+```python
+# State machine enforces transitions
+order.transition("ShipmentDispatched")
+# Raises InvalidTransition if not in CONFIRMED state
+```
+
+## 2. They Document Behavior
+
+A state diagram is worth a thousand words of documentation. Anyone can look at the diagram and understand:
+- What states exist
+- What transitions are allowed
+- What triggers transitions
+
+## 3. They Enable Testing
+
+State machines have well-defined test strategies:
+- **State coverage**: Test every state
+- **Transition coverage**: Test every valid transition
+- **Invalid transition coverage**: Test every invalid transition is rejected
+
+## 4. They Simplify Concurrency
+
+State transitions can be made atomic, preventing race conditions:
+
+```sql
+-- Atomic state transition
+UPDATE orders
+SET status = 'SHIPPED',
+    shipped_at = NOW()
+WHERE id = 123
+  AND status = 'CONFIRMED';  -- Guard: only if currently CONFIRMED
+
+-- Returns 0 rows affected if already shipped (race condition prevented)
+```
+
+# State Machines in Distributed Systems
+
+State machines aren't just for business logic. They're fundamental to distributed systems:
+
+## Raft Consensus as State Machine
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Raft Node State Machine                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│                           ┌──────────┐                                   │
+│                     ┌────►│ FOLLOWER │◄────┐                             │
+│                     │     └────┬─────┘     │                             │
+│                     │          │           │                             │
+│                     │          │ election timeout                        │
+│                     │          │ / start election                        │
+│                     │          ▼           │                             │
+│                     │     ┌───────────┐    │                             │
+│      higher term    │     │ CANDIDATE │    │ higher term                 │
+│      discovered     │     └─────┬─────┘    │ discovered                  │
+│                     │           │          │                             │
+│                     │           │ receive majority votes                 │
+│                     │           │ / become leader                        │
+│                     │           ▼          │                             │
+│                     │     ┌──────────┐     │                             │
+│                     └─────│  LEADER  │─────┘                             │
+│                           └──────────┘                                   │
+│                                 │                                        │
+│                                 │ send heartbeats                        │
+│                                 ▼                                        │
+│                           (periodic)                                     │
+│                                                                          │
+│  Events:                                                                 │
+│    • election timeout (no heartbeat received)                            │
+│    • vote received                                                       │
+│    • heartbeat received                                                  │
+│    • higher term discovered                                              │
+│                                                                          │
+│  This state machine is at the CORE of distributed consensus.             │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## TCP Connection as State Machine
+
+Every TCP connection follows a state machine:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                   TCP Connection States (Simplified)                     │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Client                              Server                              │
+│                                                                          │
+│  CLOSED ──────────────────────────── CLOSED                              │
+│     │                                   │                                │
+│     │ connect()                         │ listen()                       │
+│     ▼                                   ▼                                │
+│  SYN_SENT ───── SYN ───────────────► LISTEN                              │
+│     │                                   │                                │
+│     │         ◄──── SYN+ACK ────────────│                                │
+│     │                                   ▼                                │
+│     │ ─────────── ACK ──────────────► SYN_RCVD                           │
+│     ▼                                   │                                │
+│  ESTABLISHED ◄───────────────────────── │                                │
+│     │                                   ▼                                │
+│     │                              ESTABLISHED                           │
+│     │                                   │                                │
+│     │ ◄──────── data ────────────────► │                                │
+│     │                                   │                                │
+│     │ close()                           │                                │
+│     ▼                                   │                                │
+│  FIN_WAIT_1 ──── FIN ──────────────►   │                                │
+│     │                                   │                                │
+│     │         ◄───── ACK ───────────────│                                │
+│     ▼                                   │                                │
+│  FIN_WAIT_2                             │                                │
+│     │         ◄───── FIN ───────────────│                                │
+│     │                                   ▼                                │
+│     │ ─────────── ACK ──────────────► CLOSE_WAIT                         │
+│     ▼                                   │                                │
+│  TIME_WAIT                              │ close()                        │
+│     │                                   ▼                                │
+│     │ (2MSL timeout)                LAST_ACK                             │
+│     ▼                                   │                                │
+│  CLOSED                              CLOSED                              │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Circuit Breaker as State Machine
+
+The circuit breaker pattern is explicitly a state machine:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Circuit Breaker State Machine                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│                           ┌──────────┐                                   │
+│              success      │  CLOSED  │◄─────────────┐                    │
+│           ┌──────────────►│(normal)  │              │                    │
+│           │               └────┬─────┘              │                    │
+│           │                    │                    │                    │
+│           │                    │ failure_count > threshold               │
+│           │                    │                    │                    │
+│           │                    ▼                    │                    │
+│           │               ┌──────────┐              │                    │
+│           │               │   OPEN   │              │                    │
+│           │               │(failing) │              │ success            │
+│           │               └────┬─────┘              │                    │
+│           │                    │                    │                    │
+│           │                    │ timeout expires    │                    │
+│           │                    │                    │                    │
+│           │                    ▼                    │                    │
+│           │               ┌──────────┐              │                    │
+│           └───────────────│HALF_OPEN │──────────────┘                    │
+│              failure      │(testing) │                                   │
+│                           └──────────┘                                   │
+│                                                                          │
+│  Behavior:                                                               │
+│    CLOSED: All requests pass through                                     │
+│    OPEN: All requests fail immediately (fast fail)                       │
+│    HALF_OPEN: Limited requests pass to test recovery                     │
+│                                                                          │
+│  Guards:                                                                 │
+│    CLOSED→OPEN: failure_count > threshold within window                  │
+│    OPEN→HALF_OPEN: timeout (e.g., 30 seconds) expired                    │
+│    HALF_OPEN→CLOSED: test request succeeded                              │
+│    HALF_OPEN→OPEN: test request failed                                   │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+# Hierarchical State Machines (Statecharts)
+
+Simple state machines become unwieldy with many states. **Statecharts** (Harel, 1987) add hierarchy:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Hierarchical Order States                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  ┌─────────────────────────── ACTIVE ───────────────────────────────┐    │
+│  │                                                                   │    │
+│  │   ┌─────────────────── PROCESSING ──────────────────────────┐    │    │
+│  │   │                                                          │    │    │
+│  │   │   ┌─────────┐         ┌───────────┐         ┌────────┐  │    │    │
+│  │   │   │ PENDING │────────►│ CONFIRMED │────────►│SHIPPED │  │    │    │
+│  │   │   └─────────┘         └───────────┘         └────────┘  │    │    │
+│  │   │                                                          │    │    │
+│  │   └──────────────────────────┬───────────────────────────────┘    │    │
+│  │                              │                                    │    │
+│  │                              │ DeliveryConfirmed                  │    │
+│  │                              ▼                                    │    │
+│  │                        ┌───────────┐                              │    │
+│  │                        │ DELIVERED │                              │    │
+│  │                        └───────────┘                              │    │
+│  │                                                                   │    │
+│  └───────────────────────────────┬───────────────────────────────────┘    │
+│                                  │                                        │
+│                                  │ Cancel (from any ACTIVE state)         │
+│                                  ▼                                        │
+│                            ┌───────────┐                                  │
+│                            │ CANCELLED │                                  │
+│                            └───────────┘                                  │
+│                                                                          │
+│  Benefits:                                                               │
+│    • Cancel transition defined ONCE, applies to all substates            │
+│    • PROCESSING is a composite state with its own internal machine       │
+│    • Reduces transition explosion                                        │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Parallel States
+
+Some state machines have independent concurrent regions:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Parallel Order Tracking                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  ┌────────────────────── ORDER ─────────────────────────────────────┐    │
+│  │                                                                   │    │
+│  │  ┌─────────────── Payment Track ───────────────────────────┐     │    │
+│  │  │                                                          │     │    │
+│  │  │  UNPAID ──────► AUTHORIZED ──────► CAPTURED ──────► PAID │     │    │
+│  │  │                                                          │     │    │
+│  │  └──────────────────────────────────────────────────────────┘     │    │
+│  │                                                                   │    │
+│  │  ─────────────────────────────────────────────────────────────── │    │
+│  │                                                                   │    │
+│  │  ┌─────────────── Fulfillment Track ───────────────────────┐     │    │
+│  │  │                                                          │     │    │
+│  │  │  PENDING ─────► PICKING ─────► PACKED ─────► SHIPPED     │     │    │
+│  │  │                                                          │     │    │
+│  │  └──────────────────────────────────────────────────────────┘     │    │
+│  │                                                                   │    │
+│  └───────────────────────────────────────────────────────────────────┘    │
+│                                                                          │
+│  Order is complete when BOTH tracks reach final state:                   │
+│    Payment = PAID AND Fulfillment = SHIPPED                              │
+│                                                                          │
+│  These evolve independently—payment might complete before picking.       │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+# Implementing State Machines
+
+## Pattern 1: Enum + Switch (Simple)
+
+```python
+from enum import Enum
+
+class OrderStatus(Enum):
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    SHIPPED = "shipped"
+    DELIVERED = "delivered"
+    CANCELLED = "cancelled"
+
+class Order:
+    def __init__(self):
+        self.status = OrderStatus.PENDING
+
+    def confirm(self):
+        if self.status != OrderStatus.PENDING:
+            raise InvalidTransition(f"Cannot confirm from {self.status}")
+        self.status = OrderStatus.CONFIRMED
+        self._send_confirmation_email()
+
+    def ship(self):
+        if self.status != OrderStatus.CONFIRMED:
+            raise InvalidTransition(f"Cannot ship from {self.status}")
+        self.status = OrderStatus.SHIPPED
+        self._update_tracking()
+```
+
+**Pros**: Simple, no dependencies
+**Cons**: Transitions scattered, hard to visualize
+
+## Pattern 2: Transition Table (Declarative)
+
+```python
+TRANSITIONS = {
+    # (current_state, event) -> (next_state, action)
+    (OrderStatus.PENDING, "confirm"): (OrderStatus.CONFIRMED, send_confirmation),
+    (OrderStatus.CONFIRMED, "ship"): (OrderStatus.SHIPPED, update_tracking),
+    (OrderStatus.SHIPPED, "deliver"): (OrderStatus.DELIVERED, send_survey),
+    (OrderStatus.PENDING, "cancel"): (OrderStatus.CANCELLED, process_refund),
+    (OrderStatus.CONFIRMED, "cancel"): (OrderStatus.CANCELLED, process_refund),
+}
+
+class Order:
+    def transition(self, event: str):
+        key = (self.status, event)
+        if key not in TRANSITIONS:
+            raise InvalidTransition(f"No transition for {key}")
+
+        next_state, action = TRANSITIONS[key]
+        action(self)  # Execute side effect
+        self.status = next_state
+```
+
+**Pros**: All transitions visible in one place
+**Cons**: Guards require additional logic
+
+## Pattern 3: State Machine Library (Full-Featured)
+
+```python
+from statemachine import StateMachine, State
+
+class OrderMachine(StateMachine):
+    # States
+    pending = State(initial=True)
+    confirmed = State()
+    shipped = State()
+    delivered = State(final=True)
+    cancelled = State(final=True)
+
+    # Transitions
+    confirm = pending.to(confirmed)
+    ship = confirmed.to(shipped)
+    deliver = shipped.to(delivered)
+    cancel = pending.to(cancelled) | confirmed.to(cancelled)
+
+    # Guards
+    def before_ship(self):
+        if not self.model.inventory_allocated:
+            raise GuardFailed("Inventory not allocated")
+
+    # Actions
+    def on_enter_confirmed(self):
+        send_confirmation_email(self.model)
+
+    def on_enter_shipped(self):
+        update_tracking(self.model)
+```
+
+**Pros**: Full statechart support, guards, actions, visualization
+**Cons**: Learning curve, dependency
+
+## Pattern 4: Database-Backed State Machine
+
+```sql
+-- State transitions table
+CREATE TABLE state_transitions (
+    id SERIAL PRIMARY KEY,
+    entity_type VARCHAR(50),
+    from_state VARCHAR(50),
+    to_state VARCHAR(50),
+    event VARCHAR(50),
+    guard_function VARCHAR(100),
+    action_function VARCHAR(100)
+);
+
+-- Transition with atomic check
+UPDATE orders
+SET
+    status = 'shipped',
+    shipped_at = NOW(),
+    version = version + 1
+WHERE
+    id = $1
+    AND status = 'confirmed'  -- Guard: must be in confirmed state
+    AND version = $2;         -- Optimistic locking
+
+-- Check if transition succeeded
+-- rows_affected = 0 means transition was invalid
+```
+
+**Pros**: Atomic, works in distributed systems, audit trail
+**Cons**: Limited guard complexity, business logic in SQL
+
+# Distributed State Machines
+
+In distributed systems, state must be replicated. This is where state machines become critical:
+
+## Replicated State Machine Pattern
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                   Replicated State Machine                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  All replicas start in same state                                        │
+│  All replicas apply same commands in same order                          │
+│  All replicas reach same state                                           │
+│                                                                          │
+│  ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐     │
+│  │    Replica A    │     │    Replica B    │     │    Replica C    │     │
+│  │                 │     │                 │     │                 │     │
+│  │  State: S0      │     │  State: S0      │     │  State: S0      │     │
+│  │       │         │     │       │         │     │       │         │     │
+│  │       ▼ cmd1    │     │       ▼ cmd1    │     │       ▼ cmd1    │     │
+│  │  State: S1      │     │  State: S1      │     │  State: S1      │     │
+│  │       │         │     │       │         │     │       │         │     │
+│  │       ▼ cmd2    │     │       ▼ cmd2    │     │       ▼ cmd2    │     │
+│  │  State: S2      │     │  State: S2      │     │  State: S2      │     │
+│  └─────────────────┘     └─────────────────┘     └─────────────────┘     │
+│                                                                          │
+│  Consensus (Raft/Paxos) ensures:                                         │
+│    1. All replicas agree on command order                                │
+│    2. Commands are applied atomically                                    │
+│    3. Failed replicas can catch up                                       │
+│                                                                          │
+│  This is HOW distributed databases maintain consistency:                 │
+│    • etcd, Consul, ZooKeeper use replicated state machines               │
+│    • CockroachDB, TiDB use Multi-Raft (many state machines)              │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Multi-Raft: Many State Machines
+
+Large-scale systems partition data across many independent state machines:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        Multi-Raft Architecture                           │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Range 1 (keys A-M)           Range 2 (keys N-Z)                         │
+│  ┌─────────────────┐          ┌─────────────────┐                        │
+│  │  Raft Group 1   │          │  Raft Group 2   │                        │
+│  │  Node1: Leader  │          │  Node2: Leader  │                        │
+│  │  Node2: Follower│          │  Node3: Follower│                        │
+│  │  Node3: Follower│          │  Node1: Follower│                        │
+│  └─────────────────┘          └─────────────────┘                        │
+│                                                                          │
+│  Each range is independent state machine:                                │
+│    • Own leader election                                                 │
+│    • Own log replication                                                 │
+│    • Can be on different nodes                                           │
+│                                                                          │
+│  Benefits:                                                               │
+│    • Horizontal scaling (add ranges)                                     │
+│    • Load distribution (leaders on different nodes)                      │
+│    • Parallel writes (different ranges don't conflict)                   │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+# Workflow Engines: State Machines as a Service
+
+Modern workflow engines (Temporal, Cadence) make state machines explicit and durable:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Temporal Workflow Engine                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  @workflow                                                               │
+│  def order_workflow(order_id: str):                                      │
+│      """                                                                 │
+│      This workflow IS a state machine.                                   │
+│      Temporal tracks state, handles failures, enables replay.            │
+│      """                                                                 │
+│                                                                          │
+│      # State: RESERVING_INVENTORY                                        │
+│      reservation = await activities.reserve_inventory(order_id)          │
+│                                                                          │
+│      if not reservation.success:                                         │
+│          # State: FAILED                                                 │
+│          return OrderResult(status="failed", reason="no_inventory")      │
+│                                                                          │
+│      # State: PROCESSING_PAYMENT                                         │
+│      try:                                                                │
+│          payment = await activities.charge_payment(order_id)             │
+│      except PaymentError:                                                │
+│          # Compensating action                                           │
+│          await activities.release_inventory(order_id)                    │
+│          return OrderResult(status="failed", reason="payment_failed")    │
+│                                                                          │
+│      # State: SHIPPING                                                   │
+│      shipment = await activities.create_shipment(order_id)               │
+│                                                                          │
+│      # State: WAITING_FOR_DELIVERY                                       │
+│      # Wait up to 7 days for delivery confirmation                       │
+│      delivered = await workflow.wait_condition(                          │
+│          lambda: signals.delivery_confirmed,                             │
+│          timeout=timedelta(days=7)                                       │
+│      )                                                                   │
+│                                                                          │
+│      # State: COMPLETED                                                  │
+│      return OrderResult(status="delivered", tracking=shipment.tracking)  │
+│                                                                          │
+│                                                                          │
+│  Temporal provides:                                                      │
+│    • Durable execution (survives crashes)                                │
+│    • Automatic retry with backoff                                        │
+│    • Timeout handling                                                    │
+│    • Compensation (saga pattern built-in)                                │
+│    • Visibility (query workflow state)                                   │
+│    • Replay (debug by replaying history)                                 │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Workflow vs. Traditional State Machine
+
+| Aspect | Traditional State Machine | Workflow Engine |
+|--------|--------------------------|-----------------|
+| Persistence | You implement | Built-in |
+| Failure handling | You implement | Automatic retry |
+| Timeouts | Manual timers | Declarative |
+| Visibility | Custom | Query API |
+| Debugging | Logs | Replay execution |
+| Compensation | You implement | Built-in saga |
+
+# State Machine Testing
+
+State machines enable systematic testing:
+
+## 1. State Coverage
+
+Test that every state is reachable:
+
+```python
+def test_all_states_reachable():
+    reachable = set()
+
+    for path in all_paths(initial_state, max_depth=10):
+        for state in path:
+            reachable.add(state)
+
+    assert reachable == all_states
+```
+
+## 2. Transition Coverage
+
+Test every valid transition:
+
+```python
+@pytest.mark.parametrize("from_state,event,to_state", [
+    (PENDING, "confirm", CONFIRMED),
+    (CONFIRMED, "ship", SHIPPED),
+    (SHIPPED, "deliver", DELIVERED),
+    (PENDING, "cancel", CANCELLED),
+    (CONFIRMED, "cancel", CANCELLED),
+])
+def test_valid_transitions(from_state, event, to_state):
+    order = Order(status=from_state)
+    order.transition(event)
+    assert order.status == to_state
+```
+
+## 3. Invalid Transition Coverage
+
+Test that invalid transitions are rejected:
+
+```python
+@pytest.mark.parametrize("from_state,event", [
+    (PENDING, "ship"),      # Can't ship without confirming
+    (PENDING, "deliver"),   # Can't deliver without shipping
+    (SHIPPED, "confirm"),   # Can't confirm after shipping
+    (DELIVERED, "cancel"),  # Can't cancel after delivery
+])
+def test_invalid_transitions_rejected(from_state, event):
+    order = Order(status=from_state)
+    with pytest.raises(InvalidTransition):
+        order.transition(event)
+```
+
+## 4. Property-Based Testing
+
+Generate random event sequences:
+
+```python
+from hypothesis import given, strategies as st
+
+@given(st.lists(st.sampled_from(["confirm", "ship", "deliver", "cancel"])))
+def test_no_invalid_state(events):
+    order = Order()
+
+    for event in events:
+        try:
+            order.transition(event)
+        except InvalidTransition:
+            pass  # Expected for invalid transitions
+
+    # Assert invariants
+    assert order.status in valid_states
+    if order.status == DELIVERED:
+        assert order.shipped_at is not None
+        assert order.confirmed_at is not None
+```
+
+# Common Patterns and Anti-Patterns
+
+## Pattern: State + Event Log
+
+Combine state machine with event sourcing:
+
+```python
+class Order:
+    def __init__(self, events: List[Event] = None):
+        self.status = OrderStatus.PENDING
+        self.events = []
+
+        # Replay events to rebuild state
+        for event in (events or []):
+            self._apply(event)
+
+    def confirm(self, payment: Payment):
+        if self.status != OrderStatus.PENDING:
+            raise InvalidTransition()
+
+        event = OrderConfirmed(order_id=self.id, payment_id=payment.id)
+        self._apply(event)
+        self._persist(event)
+
+    def _apply(self, event: Event):
+        """Apply event to update state (no side effects)"""
+        match event:
+            case OrderConfirmed():
+                self.status = OrderStatus.CONFIRMED
+                self.confirmed_at = event.timestamp
+            case OrderShipped():
+                self.status = OrderStatus.SHIPPED
+                self.tracking_number = event.tracking_number
+```
+
+## Anti-Pattern: String States
+
+```python
+# Bad: States as strings
+order.status = "pending"
+order.status = "Pending"  # Typo not caught
+order.status = "in_progress"  # Invalid state accepted
+
+# Good: States as enum
+class OrderStatus(Enum):
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+
+order.status = OrderStatus.PENDING
+```
+
+## Anti-Pattern: Implicit Transitions
+
+```python
+# Bad: Transitions scattered and implicit
+if order.status == "pending" and payment.verified:
+    order.status = "confirmed"
+    send_email()
+
+# Elsewhere in codebase...
+if order.can_confirm():
+    order.status = "confirmed"  # Different logic!
+
+# Good: Centralized transition definitions
+TRANSITIONS = {
+    (PENDING, "confirm"): (CONFIRMED, [validate_payment, send_email]),
+}
+```
+
+## Anti-Pattern: Missing Final States
+
+```python
+# Bad: No terminal states defined
+# Order can keep changing forever
+
+# Good: Explicit final states
+class OrderStatus(Enum):
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    SHIPPED = "shipped"
+    DELIVERED = "delivered"      # Final
+    CANCELLED = "cancelled"      # Final
+    REFUNDED = "refunded"        # Final
+
+FINAL_STATES = {DELIVERED, CANCELLED, REFUNDED}
+```
+
+# Trade-off Summary
+
+## When to Use Explicit State Machines
+
+| Scenario | State Machine Value |
+|----------|---------------------|
+| Multiple states with specific transitions | High |
+| Complex business rules | High |
+| Audit requirements | High |
+| Concurrent modifications possible | High |
+| Distributed coordination | Essential |
+| Simple CRUD | Low (overkill) |
+
+## State Machine Complexity Spectrum
+
+```
+Simple                                                          Complex
+  │                                                                │
+  ▼                                                                ▼
+
+Boolean    Enum      Transition    State Library    Workflow
+flag       states    table                          engine
+
+if paid    switch    TRANSITIONS   StateMachine     Temporal
+  ...      (status)  dict          XState           Cadence
+```
+
+Choose the simplest approach that handles your complexity.
+
+# Conclusion
+
+State machines are implicit in every system. Making them explicit provides:
+
+1. **Documentation**: Visual representation of behavior
+2. **Correctness**: Invalid states/transitions prevented
+3. **Testability**: Systematic coverage of states and transitions
+4. **Debuggability**: Clear path through states
+5. **Concurrency safety**: Atomic transitions prevent races
+
+The distributed systems primitives we've studied—Raft, TCP, circuit breakers—are all state machines. Understanding this gives you a unified mental model for reasoning about system behavior.
+
+Combined with events (previous chapter), state machines give you a complete picture: events describe *what happened*, and state machines describe *what can happen next*.
+
+# Exercises
+
+## Conceptual Questions
+
+1. **State Explosion**: A payment can be PENDING, AUTHORIZED, CAPTURED, or REFUNDED. A shipment can be PENDING, PICKED, PACKED, SHIPPED, or DELIVERED. If you model these as a single combined state machine, how many states exist? How does the parallel state approach reduce this?
+
+2. **Guard vs. Transition**: What's the difference between having no transition from A→B and having a transition from A→B with a guard that always returns false? When would you use each approach?
+
+3. **Idempotency**: A user clicks "Confirm Order" twice quickly, sending two confirm events. How should your state machine handle this? What if the first click succeeded but the network response was lost?
+
+## Design Exercises
+
+4. **Subscription State Machine**: Design a state machine for a SaaS subscription with states for: trial, active, past_due, cancelled, expired. Include transitions for: payment, payment_failure, cancellation, renewal, reactivation. Consider: grace periods, dunning emails, voluntary vs involuntary churn.
+
+5. **Distributed Lock State Machine**: Design a state machine for a distributed lock with states: UNLOCKED, LOCKED, FENCING. Include transitions for: acquire, release, timeout, fence_token_update. How do you prevent the "zombie lock" problem where a client holding a lock becomes unresponsive?
+
+6. **Multi-Region Order**: An order must be fulfilled from the closest warehouse. Design a hierarchical state machine where the top level tracks overall order status, and a nested region tracks per-warehouse allocation (requested, confirmed, out_of_stock, shipped_partial).
+
+## Analysis Exercises
+
+7. **State Machine Metrics**: For a state machine with 5 states and 8 transitions, what metrics would you collect in production? Consider: time in each state, transition frequencies, failed transition attempts. How would you alert on anomalies?
+
+8. **Formal Verification**: Given this state machine:
+   ```
+   States: {A, B, C, D}
+   Transitions: A→B, B→C, C→D, B→A, D→A
+   Initial: A
+   Final: {D}
+   ```
+
+   Is state D reachable from A? Is it possible to get stuck (no outgoing transitions)? Can you reach D and then continue to other states?
+
+---
+
+*Next: [Ordering and Causality — Time in Distributed Systems](18-ordering.qmd)*

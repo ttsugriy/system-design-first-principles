@@ -1,0 +1,745 @@
+---
+title: "Resilience Patterns"
+subtitle: "Designing Systems That Fail Gracefully"
+author: "Taras Tsugrii"
+date: today
+bibliography: ../references.bib
+---
+
+# The Inevitability of Failure
+
+In distributed systems, failure is not an exception—it's the norm. Networks partition. Services crash. Dependencies slow down. Disks fill up. The question isn't *whether* failures happen, but *how your system behaves when they do*.
+
+**Resilience** is the ability to:
+
+1. **Detect** failures quickly
+2. **Contain** failures to prevent cascade
+3. **Recover** from failures gracefully
+4. **Degrade** functionality rather than fail completely
+
+This chapter covers the primitives that make systems resilient. These patterns compose—a robust service typically combines several of them.
+
+# The Failure Cascade Problem
+
+Consider a simple architecture: Service A calls Service B, which calls Service C.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     Failure Cascade Example                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Normal operation:                                                       │
+│    User → Service A → Service B → Service C → Database                   │
+│             10ms        15ms         5ms        10ms                     │
+│                                                                          │
+│  Service C becomes slow (1000ms):                                        │
+│    - Service B threads block waiting for C                               │
+│    - Service B thread pool exhausted                                     │
+│    - Service A requests to B start timing out                            │
+│    - Service A thread pool exhausted                                     │
+│    - All user requests fail                                              │
+│                                                                          │
+│  Timeline:                                                               │
+│    T+0:     Service C latency spikes to 1000ms                           │
+│    T+30s:   Service B thread pool 80% utilized                           │
+│    T+60s:   Service B thread pool exhausted, rejecting requests          │
+│    T+90s:   Service A starts seeing B timeouts                           │
+│    T+120s:  Complete system failure                                      │
+│                                                                          │
+│  One slow dependency → total system failure in 2 minutes                 │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+This is a **failure cascade**—a localized problem propagates through the system until everything fails. Resilience patterns prevent this.
+
+# Circuit Breaker
+
+The circuit breaker pattern prevents a failing service from being called repeatedly, giving it time to recover.
+
+## State Machine
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Circuit Breaker State Machine                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│                           success                                        │
+│                    ┌──────────────────┐                                  │
+│                    │                  │                                  │
+│                    ▼                  │                                  │
+│              ┌──────────┐             │                                  │
+│              │  CLOSED  │─────────────┘                                  │
+│              │          │                                                │
+│              │ (normal  │                                                │
+│              │operation)│                                                │
+│              └────┬─────┘                                                │
+│                   │                                                      │
+│                   │ failure threshold exceeded                           │
+│                   │ (e.g., 5 failures in 10 seconds)                     │
+│                   ▼                                                      │
+│              ┌──────────┐                                                │
+│              │   OPEN   │                                                │
+│              │          │                                                │
+│              │ (reject  │                                                │
+│              │ requests)│                                                │
+│              └────┬─────┘                                                │
+│                   │                                                      │
+│                   │ timeout expires (e.g., 30 seconds)                   │
+│                   ▼                                                      │
+│              ┌──────────┐                                                │
+│              │HALF-OPEN │                                                │
+│              │          │◄───────────────┐                               │
+│              │  (test   │                │                               │
+│              │ request) │                │ failure                       │
+│              └────┬─────┘                │                               │
+│                   │                      │                               │
+│                   │ success              │                               │
+│                   │                      │                               │
+│                   ▼                      │                               │
+│              ┌──────────┐                │                               │
+│              │  CLOSED  │   OPEN ────────┘                               │
+│              └──────────┘                                                │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Implementation Parameters
+
+| Parameter | Typical Value | Purpose |
+|-----------|--------------|---------|
+| Failure threshold | 5 failures | Number of failures before opening |
+| Failure window | 10 seconds | Time window for counting failures |
+| Open duration | 30 seconds | How long to stay open |
+| Half-open requests | 1-3 | Test requests before closing |
+| Success threshold | 3 successes | Required to close from half-open |
+
+## Pseudocode
+
+```
+class CircuitBreaker:
+    state = CLOSED
+    failure_count = 0
+    last_failure_time = null
+    open_time = null
+
+    def call(request):
+        if state == OPEN:
+            if now() - open_time > OPEN_DURATION:
+                state = HALF_OPEN
+            else:
+                raise CircuitOpenException()
+
+        try:
+            result = execute(request)
+            on_success()
+            return result
+        except Exception as e:
+            on_failure()
+            raise e
+
+    def on_success():
+        if state == HALF_OPEN:
+            success_count += 1
+            if success_count >= SUCCESS_THRESHOLD:
+                state = CLOSED
+                failure_count = 0
+        else:
+            failure_count = 0
+
+    def on_failure():
+        failure_count += 1
+        last_failure_time = now()
+
+        if failure_count >= FAILURE_THRESHOLD:
+            state = OPEN
+            open_time = now()
+```
+
+## Trade-offs
+
+| Aspect | Without Circuit Breaker | With Circuit Breaker |
+|--------|------------------------|---------------------|
+| Cascade risk | High | Low |
+| Recovery time | Slow (thundering herd) | Fast (gradual) |
+| Complexity | None | Medium |
+| False positives | N/A | Possible (healthy service rejected) |
+
+**Key insight**: Circuit breakers fail fast, freeing resources for other work. A quick failure is better than a slow one.
+
+# Retry with Exponential Backoff
+
+When a request fails, retry—but intelligently.
+
+## The Problem with Naive Retry
+
+```
+Service A retries failed requests immediately:
+  Request 1: Fail
+  Request 1 (retry 1): Fail  ← 0ms later
+  Request 1 (retry 2): Fail  ← 0ms later
+  Request 1 (retry 3): Fail  ← 0ms later
+
+Meanwhile, 1000 other clients do the same thing.
+Service B receives 4000 requests instead of 1000.
+This makes the overload worse → more failures → more retries.
+```
+
+## Exponential Backoff
+
+Wait progressively longer between retries:
+
+```
+Retry 1: wait 100ms
+Retry 2: wait 200ms
+Retry 3: wait 400ms
+Retry 4: wait 800ms
+Retry 5: wait 1600ms (capped at max)
+```
+
+Formula: `delay = min(base_delay * 2^attempt, max_delay)`
+
+## Jitter: Preventing Thundering Herd
+
+If all clients back off identically, they'll all retry at the same time:
+
+```
+T=0:    1000 requests fail
+T=100:  1000 retries arrive simultaneously  ← thundering herd
+```
+
+**Add jitter** (randomness) to spread out retries:
+
+```
+Full jitter:     delay = random(0, calculated_delay)
+Equal jitter:    delay = calculated_delay/2 + random(0, calculated_delay/2)
+Decorrelated:    delay = random(base, previous_delay * 3)
+```
+
+## Implementation
+
+```
+def retry_with_backoff(request, max_retries=5):
+    base_delay = 100  # milliseconds
+    max_delay = 10000
+
+    for attempt in range(max_retries):
+        try:
+            return execute(request)
+        except RetryableException:
+            if attempt == max_retries - 1:
+                raise
+
+            delay = min(base_delay * (2 ** attempt), max_delay)
+            jittered_delay = random.uniform(0, delay)  # full jitter
+            sleep(jittered_delay)
+```
+
+## What to Retry
+
+Not all failures are retryable:
+
+| Error Type | Retry? | Reason |
+|------------|--------|--------|
+| Network timeout | Yes | Transient network issue |
+| 500 Internal Server Error | Yes | Server may recover |
+| 503 Service Unavailable | Yes | Explicit "try later" |
+| 429 Too Many Requests | Yes | After delay from header |
+| 400 Bad Request | No | Client error won't change |
+| 401 Unauthorized | No | Credentials won't change |
+| 404 Not Found | No | Resource doesn't exist |
+
+# Timeout
+
+Set explicit limits on how long to wait for responses.
+
+## The Problem Without Timeouts
+
+```
+Service B becomes slow (never responds).
+Service A waits forever.
+Thread blocked → thread pool exhausted → A fails.
+```
+
+## Timeout Hierarchy
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        Timeout Layers                                    │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Client request arrives                                                  │
+│       │                                                                  │
+│       ▼                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │  Overall Request Timeout: 30s                                    │    │
+│  │  (Total time user is willing to wait)                            │    │
+│  │                                                                   │    │
+│  │  ┌─────────────────────────────────────────────────────────┐     │    │
+│  │  │  Service A processing: 5s budget                         │     │    │
+│  │  │                                                          │     │    │
+│  │  │  ┌────────────────────────────────────────────────┐      │     │    │
+│  │  │  │  Call to Service B: 10s timeout                │      │     │    │
+│  │  │  │    - Connection timeout: 1s                    │      │     │    │
+│  │  │  │    - Read timeout: 9s                          │      │     │    │
+│  │  │  └────────────────────────────────────────────────┘      │     │    │
+│  │  │                                                          │     │    │
+│  │  │  ┌────────────────────────────────────────────────┐      │     │    │
+│  │  │  │  Call to Database: 5s timeout                  │      │     │    │
+│  │  │  │    - Connection timeout: 500ms                 │      │     │    │
+│  │  │  │    - Query timeout: 4.5s                       │      │     │    │
+│  │  │  └────────────────────────────────────────────────┘      │     │    │
+│  │  │                                                          │     │    │
+│  │  └──────────────────────────────────────────────────────────┘     │    │
+│  └───────────────────────────────────────────────────────────────────┘    │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Timeout Types
+
+| Timeout Type | Purpose | Typical Value |
+|--------------|---------|---------------|
+| Connection timeout | Time to establish TCP connection | 1-5s |
+| Read timeout | Time to receive response after sending | 5-30s |
+| Write timeout | Time to send request | 5-10s |
+| Idle timeout | Time before closing idle connection | 60-300s |
+| Overall timeout | Total operation time | Sum of all steps |
+
+## Timeout Propagation
+
+When services call other services, propagate remaining time budget:
+
+```
+Incoming request has 30s timeout.
+Service A processing takes 5s.
+Pass 25s timeout to Service B call.
+Service B processing takes 3s.
+Pass 22s timeout to Service C call.
+```
+
+This prevents scenarios where:
+- Original timeout: 30s
+- Service A calls B with 30s timeout
+- B calls C with 30s timeout
+- Total possible wait: 90s (3x the user's expectation)
+
+# Bulkhead
+
+Isolate components so failure in one doesn't exhaust resources for others.
+
+## The Problem
+
+```
+Service A has one thread pool (100 threads).
+Calls three dependencies: B, C, D.
+
+D becomes slow → all 100 threads waiting on D.
+Now requests to B and C also fail (no threads available).
+```
+
+## Solution: Separate Thread Pools
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         Bulkhead Pattern                                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Service A                                                               │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │                                                                    │  │
+│  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐ │  │
+│  │  │  Thread Pool B   │  │  Thread Pool C   │  │  Thread Pool D   │ │  │
+│  │  │  (30 threads)    │  │  (30 threads)    │  │  (40 threads)    │ │  │
+│  │  │                  │  │                  │  │                  │ │  │
+│  │  │  ████████░░░░░░  │  │  ██░░░░░░░░░░░░  │  │  ████████████████│ │  │
+│  │  │  (10 in use)     │  │  (2 in use)      │  │  (40 blocked)    │ │  │
+│  │  │                  │  │                  │  │                  │ │  │
+│  │  │  ✓ Healthy       │  │  ✓ Healthy       │  │  ✗ Saturated     │ │  │
+│  │  └────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘ │  │
+│  │           │                     │                     │           │  │
+│  └───────────┼─────────────────────┼─────────────────────┼───────────┘  │
+│              │                     │                     │              │
+│              ▼                     ▼                     ▼              │
+│         Service B             Service C            Service D           │
+│         (healthy)             (healthy)            (slow/failing)      │
+│                                                                          │
+│  Result: D's failure only affects D-related requests.                   │
+│          B and C requests continue normally.                            │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Bulkhead Sizing
+
+| Factor | Consideration |
+|--------|--------------|
+| Dependency criticality | More threads for critical dependencies |
+| Expected latency | Faster dependencies need fewer threads |
+| Request rate | Higher rate needs larger pool |
+| Failure blast radius | Smaller pools = smaller blast radius |
+
+## Semaphore Bulkhead
+
+For lighter isolation without thread pool overhead:
+
+```
+class SemaphoreBulkhead:
+    semaphore = Semaphore(max_concurrent=10)
+
+    def call(request):
+        if not semaphore.try_acquire(timeout=100ms):
+            raise BulkheadFullException()
+        try:
+            return execute(request)
+        finally:
+            semaphore.release()
+```
+
+# Rate Limiting
+
+Protect services from being overwhelmed by too many requests.
+
+## Algorithms
+
+### Token Bucket
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         Token Bucket                                     │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Bucket capacity: 10 tokens                                              │
+│  Refill rate: 5 tokens/second                                            │
+│                                                                          │
+│  ┌─────────────────────┐                                                 │
+│  │ ● ● ● ● ● ● ● ○ ○ ○ │  ← 7 tokens available                          │
+│  └─────────────────────┘                                                 │
+│            ▲        │                                                    │
+│            │        ▼                                                    │
+│     Refill 5/sec   Request takes 1 token                                 │
+│                                                                          │
+│  Request arrives:                                                        │
+│    - Token available → consume token, process request                    │
+│    - No token → reject (429 Too Many Requests)                           │
+│                                                                          │
+│  Properties:                                                             │
+│    - Allows bursts up to bucket capacity                                 │
+│    - Smooths out traffic over time                                       │
+│    - Simple to implement                                                 │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Leaky Bucket
+
+Requests enter a queue, processed at fixed rate. Overflow rejected.
+
+### Sliding Window
+
+Count requests in rolling time window. More accurate than fixed window but more memory.
+
+## Rate Limit Dimensions
+
+| Dimension | Example | Use Case |
+|-----------|---------|----------|
+| Per user | 100 req/min per user ID | Prevent abuse |
+| Per API key | 1000 req/min per API key | Tiered pricing |
+| Per IP | 50 req/min per IP | Anti-DDoS |
+| Global | 10000 req/sec total | Protect backend |
+
+## Graceful Rate Limiting
+
+```
+Response headers:
+  X-RateLimit-Limit: 100
+  X-RateLimit-Remaining: 23
+  X-RateLimit-Reset: 1640000000
+  Retry-After: 37
+
+Client can:
+  1. Check remaining before sending
+  2. Wait until reset if exhausted
+  3. Use Retry-After for backoff
+```
+
+# Health Checks
+
+Detect failures proactively rather than waiting for user requests to fail.
+
+## Types of Health Checks
+
+### Liveness Check
+
+"Is the process running?"
+
+```
+GET /health/live
+→ 200 OK  (process alive)
+→ 503     (process dead/stuck)
+```
+
+If liveness fails repeatedly → restart the process.
+
+### Readiness Check
+
+"Is the service ready to accept traffic?"
+
+```
+GET /health/ready
+→ 200 OK  (ready for traffic)
+→ 503     (not ready—don't route traffic here)
+```
+
+Readiness can fail while liveness passes (e.g., during startup, or when a dependency is down).
+
+### Deep Health Check
+
+"Are all dependencies working?"
+
+```
+GET /health/deep
+→ 200 OK
+{
+  "status": "healthy",
+  "checks": {
+    "database": {"status": "healthy", "latency_ms": 5},
+    "cache": {"status": "healthy", "latency_ms": 1},
+    "service_b": {"status": "degraded", "latency_ms": 500}
+  }
+}
+```
+
+## Health Check Patterns
+
+| Pattern | Implementation | Trade-off |
+|---------|---------------|-----------|
+| Shallow | Return 200 immediately | Fast, but misses dependency failures |
+| Deep | Check all dependencies | Accurate, but slow and can cascade |
+| Cached | Cache deep check result | Balance of accuracy and speed |
+| Synthetic | Execute sample request | Tests real path, but adds load |
+
+# Graceful Degradation
+
+When the system can't handle full load, reduce functionality instead of failing completely.
+
+## Strategies
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Graceful Degradation Strategies                       │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  1. FEATURE SHEDDING                                                     │
+│     Normal: Full product page with recommendations, reviews, inventory   │
+│     Degraded: Basic product page (static data only)                      │
+│                                                                          │
+│  2. RESPONSE SIMPLIFICATION                                              │
+│     Normal: Full JSON response with all fields                           │
+│     Degraded: Minimal response with essential fields only                │
+│                                                                          │
+│  3. CACHE EXTENSION                                                      │
+│     Normal: Serve fresh data (cache TTL: 60s)                            │
+│     Degraded: Serve stale data (extend TTL to 3600s)                     │
+│                                                                          │
+│  4. QUALITY REDUCTION                                                    │
+│     Normal: High-resolution images, full video quality                   │
+│     Degraded: Thumbnails, lower bitrate                                  │
+│                                                                          │
+│  5. ASYNC FALLBACK                                                       │
+│     Normal: Synchronous order processing                                 │
+│     Degraded: Queue order for later processing, return "accepted"        │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Priority Tiers
+
+Not all requests are equal. Define priority tiers:
+
+| Tier | Example | During Overload |
+|------|---------|-----------------|
+| Critical | Payment processing | Always process |
+| High | User authentication | Process if possible |
+| Normal | Product browsing | Shed if needed |
+| Low | Analytics, logging | Shed first |
+
+# Load Shedding
+
+When overloaded, reject requests rather than serving them slowly.
+
+## Why Shed Load?
+
+```
+Server capacity: 1000 requests/second
+Incoming load: 2000 requests/second
+
+Option A: Try to serve all
+  - All 2000 requests take 2x longer
+  - All users unhappy
+  - Server may crash
+
+Option B: Shed 50%, serve rest well
+  - 1000 requests served quickly
+  - 1000 rejected immediately (fast failure)
+  - 50% of users happy, 50% can retry
+```
+
+## Load Shedding Strategies
+
+### LIFO (Last In, First Out)
+
+Reject oldest requests first. Newer requests more likely to have waiting users.
+
+### Priority-Based
+
+Reject low-priority requests before high-priority.
+
+### Admission Control
+
+Reject at entry point based on queue depth:
+
+```
+if queue_depth > threshold:
+    reject_probability = (queue_depth - threshold) / threshold
+    if random() < reject_probability:
+        return 503 Service Unavailable
+```
+
+# Putting It All Together
+
+These patterns compose into a defense-in-depth strategy:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Resilience Pattern Stack                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Incoming Request                                                        │
+│       │                                                                  │
+│       ▼                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │  RATE LIMITER                                                    │    │
+│  │  Protect against abuse and DoS                                   │    │
+│  └────────────────────────────┬────────────────────────────────────┘    │
+│                               │                                          │
+│                               ▼                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │  LOAD SHEDDER                                                    │    │
+│  │  Reject excess load to maintain quality                          │    │
+│  └────────────────────────────┬────────────────────────────────────┘    │
+│                               │                                          │
+│                               ▼                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │  TIMEOUT                                                         │    │
+│  │  Set overall request budget                                      │    │
+│  └────────────────────────────┬────────────────────────────────────┘    │
+│                               │                                          │
+│                               ▼                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │  BULKHEAD                                                        │    │
+│  │  Isolate dependency calls                                        │    │
+│  │                                                                   │    │
+│  │  ┌──────────────────────────────────────────────────────────┐   │    │
+│  │  │  CIRCUIT BREAKER                                          │   │    │
+│  │  │  Fail fast when dependency is down                        │   │    │
+│  │  │                                                           │   │    │
+│  │  │  ┌────────────────────────────────────────────────────┐  │   │    │
+│  │  │  │  RETRY WITH BACKOFF                                │  │   │    │
+│  │  │  │  Handle transient failures                         │  │   │    │
+│  │  │  │                                                    │  │   │    │
+│  │  │  │  ┌────────────────────────────────────────────┐   │  │   │    │
+│  │  │  │  │  Dependency Call                           │   │  │   │    │
+│  │  │  │  └────────────────────────────────────────────┘   │  │   │    │
+│  │  │  │                                                    │  │   │    │
+│  │  │  └────────────────────────────────────────────────────┘  │   │    │
+│  │  │                                                           │   │    │
+│  │  └───────────────────────────────────────────────────────────┘   │    │
+│  │                                                                   │    │
+│  └───────────────────────────────────────────────────────────────────┘    │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Real-World Example: Netflix Hystrix (Historical)
+
+Netflix pioneered many of these patterns with Hystrix [@nygard2018release]:
+
+- Thread pool bulkheads per dependency
+- Circuit breakers with configurable thresholds
+- Request caching and collapsing
+- Real-time monitoring dashboards
+
+While Hystrix is now in maintenance mode (replaced by Resilience4j), its patterns remain foundational.
+
+# Exercises
+
+## Conceptual Questions
+
+1. **Circuit Breaker Tuning**: Your circuit breaker opens after 5 failures in 10 seconds. The downstream service has:
+   - Normal error rate: 1%
+   - Typical request rate: 100/second
+   - Recovery time after issues: 5 seconds
+
+   Is the circuit breaker likely to open during normal operation? What would you change?
+
+2. **Retry vs. Circuit Breaker**: Explain how retries and circuit breakers interact. If a circuit breaker is open, should the caller retry? Design a policy that combines both patterns effectively.
+
+3. **Bulkhead Trade-offs**: You have 100 threads and 3 dependencies with equal importance. Compare:
+   - One shared pool of 100 threads
+   - Three pools of 33 threads each
+   - Three pools of 20 threads each (40 threads reserved for "other")
+
+   What are the trade-offs of each approach?
+
+## Analysis Exercises
+
+4. **Cascade Timing**: Service A calls B (10s timeout), B calls C (10s timeout), C calls D (10s timeout).
+   - What is the worst-case latency a user experiences?
+   - If the user has a 30-second timeout, what happens?
+   - Design a timeout propagation strategy that respects the 30-second budget.
+
+5. **Rate Limiter Design**: Your API has three tiers:
+   - Free: 10 requests/minute
+   - Pro: 100 requests/minute
+   - Enterprise: 1000 requests/minute
+
+   Design a rate limiting system. Consider: storage (where to track counts), clock synchronization (distributed limiters), and burst handling.
+
+## Design Exercises
+
+6. **Resilient Payment Service**: Design the resilience strategy for a payment processing service that:
+   - Calls a fraud detection service (can be slow)
+   - Calls a payment gateway (occasionally fails)
+   - Updates an order database
+
+   Specify: timeouts, retries, circuit breakers, fallback behavior. What happens if fraud detection is down? What is the user experience in each failure mode?
+
+7. **Multi-Region Failover**: Your service runs in 3 regions. Design a health check and failover strategy that:
+   - Detects regional failures within 30 seconds
+   - Reroutes traffic automatically
+   - Handles false positives (don't failover unnecessarily)
+   - Recovers gracefully when the region heals
+
+# Conclusion
+
+Resilience is not optional—it's essential for any system operating at scale. The key patterns:
+
+| Pattern | Purpose | Trade-off |
+|---------|---------|-----------|
+| Circuit Breaker | Stop calling failed services | May reject healthy requests |
+| Retry + Backoff | Handle transient failures | Increases latency, may amplify load |
+| Timeout | Bound waiting time | May reject slow-but-successful requests |
+| Bulkhead | Isolate failures | Reduces total throughput |
+| Rate Limiting | Prevent overload | Rejects legitimate requests |
+| Health Checks | Detect failures early | Adds overhead and complexity |
+| Graceful Degradation | Maintain partial service | Reduced functionality |
+| Load Shedding | Maintain quality under load | Some requests fail fast |
+
+These patterns follow a common theme: **it's better to fail fast and predictably than to fail slowly and unpredictably**. A quick rejection allows clients to retry elsewhere; a slow failure wastes resources and creates cascades.
+
+Building resilient systems means thinking about failure from the start—not as an afterthought, but as a fundamental design constraint.
+
+---
+
+*Next: [Observability — Understanding What Your System Is Doing](20-observability.qmd)*

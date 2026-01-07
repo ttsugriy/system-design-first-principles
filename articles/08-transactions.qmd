@@ -1,0 +1,1025 @@
+---
+title: "Transactions"
+subtitle: "Correctness in the Face of Concurrency and Failure"
+author: "Taras Tsugrii"
+date: today
+bibliography: ../references.bib
+---
+
+# Introduction: The Coordination Problem
+
+Imagine two users simultaneously updating the same bank account balance. Or a system crash occurring halfway through transferring money between accounts. Or a query reading data while another process is modifying it.
+
+Without coordination, these scenarios lead to:
+
+- **Lost updates**: Both users read balance $100, both add $50, final balance is $150 instead of $200
+- **Partial failures**: Money debited from one account but never credited to another
+- **Inconsistent reads**: Query sees half-updated data, draws wrong conclusions
+
+**Transactions** solve these problems by providing guarantees about how operations execute—even when things go wrong.
+
+# ACID: The Four Guarantees
+
+The classic transaction model provides four properties, known as ACID:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           ACID Properties                                │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Atomicity      "All or nothing"                                         │
+│  ───────────    Transaction either fully commits or fully aborts.        │
+│                 No partial results visible.                              │
+│                                                                          │
+│  Consistency    "Valid states only"                                      │
+│  ───────────    Database moves from one valid state to another.          │
+│                 Constraints are preserved.                               │
+│                                                                          │
+│  Isolation      "As if alone"                                            │
+│  ─────────      Concurrent transactions don't interfere.                 │
+│                 Each sees a consistent view.                             │
+│                                                                          │
+│  Durability     "Permanent once committed"                               │
+│  ──────────     Committed data survives crashes.                         │
+│                 Written to stable storage.                               │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+Let's examine each property and the primitives that implement it.
+
+## Atomicity: All or Nothing
+
+**The problem**: A transaction might fail partway through. If we've already made some changes, we need to undo them.
+
+**The primitive**: Write-Ahead Logging (WAL)
+
+Before modifying any data, write the intended change to a sequential log:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        Write-Ahead Log (WAL)                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Transaction writes:                                                     │
+│    1. Write "BEGIN T1" to WAL                                            │
+│    2. Write "SET account_A = 50" to WAL                                  │
+│    3. Write "SET account_B = 150" to WAL                                 │
+│    4. Write "COMMIT T1" to WAL                                           │
+│    5. Apply changes to actual data pages                                 │
+│                                                                          │
+│  On crash recovery:                                                      │
+│    - If COMMIT found: Replay changes (redo)                              │
+│    - If no COMMIT: Ignore changes (implicit abort)                       │
+│                                                                          │
+│  WAL record format:                                                      │
+│  ┌──────┬──────┬────────────────┬──────────────────┐                     │
+│  │ LSN  │ TxID │ Operation      │ Before/After     │                     │
+│  ├──────┼──────┼────────────────┼──────────────────┤                     │
+│  │ 1001 │ T1   │ UPDATE account │ old=100, new=50  │                     │
+│  │ 1002 │ T1   │ UPDATE account │ old=100, new=150 │                     │
+│  │ 1003 │ T1   │ COMMIT         │ -                │                     │
+│  └──────┴──────┴────────────────┴──────────────────┘                     │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Performance cost**: Every transaction requires at least one `fsync` to the WAL.
+
+| Sync mode | Durability | Latency |
+|-----------|------------|---------|
+| Synchronous (fsync per commit) | Full | 1-10 ms |
+| Group commit (batch fsyncs) | Full | 0.5-2 ms amortized |
+| Asynchronous | Risk of recent loss | <0.1 ms |
+
+PostgreSQL default: synchronous commits with group commit optimization.
+
+## Consistency: A Shared Responsibility
+
+**Common misconception**: The database magically maintains consistency.
+
+**Reality**: Consistency is a contract between application and database.
+
+- **Application's job**: Write transactions that preserve business invariants
+- **Database's job**: Enforce declared constraints (foreign keys, unique indexes, check constraints)
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Consistency Responsibilities                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Application enforces:                     Database enforces:            │
+│  ─────────────────────                     ──────────────────            │
+│  • Business logic rules                    • Primary/foreign keys        │
+│  • Cross-table invariants                  • Unique constraints          │
+│  • Semantic correctness                    • Check constraints           │
+│  • "Balance >= 0" logic                    • NOT NULL                    │
+│                                                                          │
+│  Example:                                                                │
+│  "Total money in system is constant"       "account_id is unique"        │
+│  → Application must credit and debit       → Database rejects duplicates │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Durability: Surviving Crashes
+
+**The guarantee**: Once a transaction commits, its effects persist even if the system crashes immediately after.
+
+**The mechanism**: Data must reach stable storage before commit returns.
+
+```
+Durability hierarchy (from weakest to strongest):
+
+1. In-memory only          → Lost on process crash
+2. OS page cache           → Lost on OS crash
+3. fsync to local disk     → Lost on disk failure
+4. Replicated (sync)       → Survives single node failure
+5. Replicated (multi-DC)   → Survives datacenter failure
+```
+
+**Trade-off**: Each level adds latency.
+
+| Durability level | Additional latency |
+|------------------|-------------------|
+| Local fsync | 1-10 ms |
+| Sync replication (same DC) | 1-5 ms |
+| Sync replication (cross-DC) | 50-150 ms |
+
+Most databases default to local fsync. Distributed databases like CockroachDB add replication.
+
+## Isolation: The Complex One
+
+Isolation determines what concurrent transactions can see of each other's changes. Unlike the other properties, isolation exists on a **spectrum**—and this is where most of the complexity lives.
+
+# Isolation Levels: The Concurrency Spectrum
+
+Full isolation (serializability) is expensive. Weaker levels trade correctness for performance.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        Isolation Level Spectrum                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│   Weak                                                           Strong  │
+│    │                                                                │    │
+│    ▼                                                                ▼    │
+│                                                                          │
+│   Read         Read           Repeatable      Snapshot      Serializable │
+│   Uncommitted  Committed      Read            Isolation                  │
+│                                                                          │
+│   ────────────────────────────────────────────────────────────────────── │
+│   More concurrency ◄──────────────────────────────► More correctness     │
+│   Lower latency    ◄──────────────────────────────► Higher latency       │
+│   More anomalies   ◄──────────────────────────────► Fewer anomalies      │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Concurrency Anomalies
+
+Each isolation level prevents certain anomalies:
+
+### Dirty Read
+
+Reading uncommitted data from another transaction.
+
+```
+T1: UPDATE account SET balance = 50 WHERE id = 1;  -- uncommitted
+T2: SELECT balance FROM account WHERE id = 1;       -- reads 50!
+T1: ROLLBACK;                                       -- balance is really 100
+T2: -- has acted on invalid data
+```
+
+### Non-Repeatable Read
+
+Same query returns different results within one transaction.
+
+```
+T1: SELECT balance FROM account WHERE id = 1;  -- returns 100
+T2: UPDATE account SET balance = 50 WHERE id = 1; COMMIT;
+T1: SELECT balance FROM account WHERE id = 1;  -- returns 50!
+```
+
+### Phantom Read
+
+New rows appear in a repeated range query.
+
+```
+T1: SELECT * FROM orders WHERE total > 100;     -- returns 3 rows
+T2: INSERT INTO orders (total) VALUES (150); COMMIT;
+T1: SELECT * FROM orders WHERE total > 100;     -- returns 4 rows!
+```
+
+### Write Skew
+
+Two transactions read the same data, then make writes based on stale reads.
+
+```
+-- Constraint: At least one doctor must be on call
+-- Initially: doctor_a.on_call = true, doctor_b.on_call = true
+
+T1: SELECT * FROM doctors WHERE on_call = true;  -- sees both on call
+T2: SELECT * FROM doctors WHERE on_call = true;  -- sees both on call
+T1: UPDATE doctors SET on_call = false WHERE name = 'A'; COMMIT;
+T2: UPDATE doctors SET on_call = false WHERE name = 'B'; COMMIT;
+-- Result: Nobody on call! Constraint violated.
+```
+
+### Lost Update
+
+Two transactions read and update the same row; one update is lost.
+
+```
+T1: balance = SELECT balance FROM account WHERE id = 1;  -- 100
+T2: balance = SELECT balance FROM account WHERE id = 1;  -- 100
+T1: UPDATE account SET balance = balance + 10;  -- sets to 110
+T2: UPDATE account SET balance = balance + 20;  -- sets to 120, not 130!
+-- T1's update is lost
+```
+
+## Isolation Level Comparison
+
+| Level | Dirty Read | Non-Repeatable | Phantom | Write Skew | Lost Update |
+|-------|------------|----------------|---------|------------|-------------|
+| Read Uncommitted | ❌ Possible | ❌ Possible | ❌ Possible | ❌ Possible | ❌ Possible |
+| Read Committed | ✓ Prevented | ❌ Possible | ❌ Possible | ❌ Possible | ❌ Possible |
+| Repeatable Read | ✓ Prevented | ✓ Prevented | ❌ Possible | ❌ Possible | ✓ Prevented |
+| Snapshot Isolation | ✓ Prevented | ✓ Prevented | ✓ Prevented | ❌ Possible | ✓ Prevented |
+| Serializable | ✓ Prevented | ✓ Prevented | ✓ Prevented | ✓ Prevented | ✓ Prevented |
+
+## Real-World Defaults
+
+| Database | Default Isolation | Notes |
+|----------|-------------------|-------|
+| PostgreSQL | Read Committed | Offers Serializable via SSI |
+| MySQL InnoDB | Repeatable Read | Uses MVCC + next-key locking |
+| Oracle | Read Committed | Serializable is "Serializable" in quotes |
+| SQL Server | Read Committed | Offers Snapshot Isolation option |
+| CockroachDB | Serializable | No weaker option—correctness first |
+
+**Key insight**: Most production databases use Read Committed by default, trading correctness for performance. Applications must handle anomalies or request stronger isolation.
+
+# Concurrency Control Mechanisms
+
+How do databases actually implement isolation? Three main approaches:
+
+## 1. Two-Phase Locking (2PL)
+
+The pessimistic approach: acquire locks before accessing data.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     Two-Phase Locking (2PL)                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Phase 1: Growing                      Phase 2: Shrinking                │
+│  ─────────────────                     ──────────────────                │
+│  Acquire locks as needed               Release locks                     │
+│  No locks released                     No new locks acquired             │
+│                                                                          │
+│  Timeline:                                                               │
+│                                                                          │
+│    Begin ──► Acquire ──► Acquire ──► Commit ──► Release ──► Release      │
+│              Lock A      Lock B       Point      Lock A      Lock B      │
+│                                         │                                │
+│              ◄─── Growing Phase ────►   │   ◄─── Shrinking Phase ────►   │
+│                                                                          │
+│  Strict 2PL: Hold all locks until commit (most common)                   │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Lock types**:
+
+| Lock | Allows | Used for |
+|------|--------|----------|
+| Shared (S) | Other S locks | Reading |
+| Exclusive (X) | Nothing else | Writing |
+
+**Deadlock example**:
+
+```
+T1: LOCK A (succeeds)
+T2: LOCK B (succeeds)
+T1: LOCK B (waits for T2)
+T2: LOCK A (waits for T1)
+-- Deadlock! Database must abort one transaction.
+```
+
+**Deadlock handling**:
+
+- **Detection**: Build wait-for graph, detect cycles, abort victim
+- **Prevention**: Wound-wait or wait-die schemes (timeout-based)
+- **Typical timeout**: 1-5 seconds
+
+**Trade-offs**:
+
+| Aspect | 2PL Characteristic |
+|--------|-------------------|
+| Concurrency | Low—readers block writers, writers block everyone |
+| Correctness | High—provides true serializability |
+| Deadlocks | Possible—requires detection/handling |
+| Complexity | Low—conceptually simple |
+
+**When to use**: Low-concurrency workloads, strong correctness requirements, simple implementations.
+
+## 2. Optimistic Concurrency Control (OCC)
+
+The hopeful approach: assume no conflicts, validate at commit.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                 Optimistic Concurrency Control (OCC)                     │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Phase 1: Read            Phase 2: Validate         Phase 3: Write       │
+│  ─────────────            ────────────────          ───────────────      │
+│  Read data into           Check if anyone           Apply changes        │
+│  local workspace          else modified             to database          │
+│                           our read set                                   │
+│                                                                          │
+│  Timeline:                                                               │
+│                                                                          │
+│    Begin ──► Read ──► Read ──► Validate ──► Write ──► Commit             │
+│              X         Y         │           X, Y                        │
+│                                  │                                       │
+│                            Conflict? ──► Abort & Retry                   │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Validation check**:
+
+```
+For each item in our read set:
+    If item.version != version_we_read:
+        ABORT  -- Someone else modified it
+    Else:
+        Continue
+COMMIT
+```
+
+**Trade-offs**:
+
+| Aspect | OCC Characteristic |
+|--------|-------------------|
+| Concurrency | High—no blocking during reads |
+| Correctness | High—serializability via validation |
+| Aborts | High under contention—wasted work |
+| Complexity | Medium—tracking read/write sets |
+
+**When to use**: Read-heavy workloads, low contention, short transactions.
+
+**Real-world example**: Google Percolator uses OCC for large-scale incremental processing.
+
+## 3. Multi-Version Concurrency Control (MVCC)
+
+The dominant approach: maintain multiple versions, let readers see consistent snapshots. The theoretical foundations were established by Bernstein and Goodman [@bernstein1983mvcc].
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                Multi-Version Concurrency Control (MVCC)                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Core insight: Readers don't block writers. Writers don't block readers. │
+│                                                                          │
+│  Version chain for row with id=1:                                        │
+│                                                                          │
+│    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐              │
+│    │ Version 3    │───►│ Version 2    │───►│ Version 1    │              │
+│    │ value = 150  │    │ value = 100  │    │ value = 50   │              │
+│    │ xmin = 103   │    │ xmin = 101   │    │ xmin = 99    │              │
+│    │ xmax = ∞     │    │ xmax = 103   │    │ xmax = 101   │              │
+│    └──────────────┘    └──────────────┘    └──────────────┘              │
+│          ▲                                                               │
+│          │                                                               │
+│     Current version                                                      │
+│                                                                          │
+│  Transaction visibility:                                                 │
+│    - T100 sees Version 1 (only version committed before T100 started)    │
+│    - T102 sees Version 2 (T101 committed, T103 not yet)                  │
+│    - T104 sees Version 3 (T103 committed)                                │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### PostgreSQL MVCC Implementation
+
+PostgreSQL stores version info directly in tuple headers:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    PostgreSQL Tuple Header                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐    │
+│  │ xmin    │ Transaction ID that created this version               │    │
+│  │ xmax    │ Transaction ID that deleted/updated (0 if current)     │    │
+│  │ cmin    │ Command ID within transaction (for same-txn visibility)│    │
+│  │ cmax    │ Command ID of delete/update                            │    │
+│  │ ctid    │ Physical location of next version (if updated)         │    │
+│  └──────────────────────────────────────────────────────────────────┘    │
+│                                                                          │
+│  Visibility rule:                                                        │
+│    Row visible to transaction T if:                                      │
+│      xmin < T.snapshot_xmin AND xmin committed                           │
+│      AND (xmax = 0 OR xmax > T.snapshot_xmin OR xmax aborted)            │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### MySQL InnoDB MVCC Implementation
+
+InnoDB uses undo logs for old versions:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    MySQL InnoDB MVCC                                     │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Current row (clustered index):                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐     │
+│  │ DATA │ DB_TRX_ID │ DB_ROLL_PTR ─────────┐                        │     │
+│  │ 150  │ 103       │                      │                        │     │
+│  └─────────────────────────────────────────│───────────────────────┘     │
+│                                            │                             │
+│                                            ▼                             │
+│  Undo log (for rollback and MVCC reads):                                 │
+│  ┌─────────────────────────────────────────────────────────────────┐     │
+│  │ Old value: 100 │ Old TRX_ID: 101 │ Prev undo ──┐                │     │
+│  └────────────────────────────────────────────────│────────────────┘     │
+│                                                   │                      │
+│                                                   ▼                      │
+│  ┌─────────────────────────────────────────────────────────────────┐     │
+│  │ Old value: 50  │ Old TRX_ID: 99  │ Prev undo: NULL              │     │
+│  └─────────────────────────────────────────────────────────────────┘     │
+│                                                                          │
+│  Read process: Follow undo chain until finding visible version           │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### MVCC Trade-offs
+
+| Aspect | MVCC Characteristic |
+|--------|---------------------|
+| Concurrency | High—readers never block |
+| Read performance | Excellent—snapshot always available |
+| Write performance | Good—no read locks to acquire |
+| Storage | Higher—multiple versions stored |
+| Garbage collection | Required—VACUUM (Postgres), purge threads (MySQL) |
+
+**MVCC overhead**:
+
+- **PostgreSQL**: ~23 bytes per-row overhead, VACUUM required
+- **MySQL**: ~6 bytes per-row overhead, undo log space
+
+**Garbage collection impact**:
+
+```
+Long-running transactions prevent cleanup:
+
+T1: BEGIN; -- snapshot at time 1000
+... 1 hour passes ...
+T2, T3, T4, ... create millions of row versions
+... all versions since time 1000 cannot be cleaned
+... table bloat, index bloat, performance degradation
+
+Solution: Monitor and kill long-running transactions
+PostgreSQL: SELECT * FROM pg_stat_activity WHERE state = 'idle in transaction';
+```
+
+## Mechanism Comparison
+
+| Mechanism | Readers Block | Writers Block | Deadlocks | Version Storage | Best For |
+|-----------|---------------|---------------|-----------|-----------------|----------|
+| 2PL | On write locks | On any lock | Yes | None | Low concurrency, simple |
+| OCC | Never | Never | No | Read/write sets | Read-heavy, low contention |
+| MVCC | Never | On same row | Rare | Version chains | General purpose |
+
+**Industry winner**: MVCC dominates modern databases because "readers don't block writers" is crucial for web workloads with many concurrent reads.
+
+# Serializable Snapshot Isolation (SSI)
+
+Traditional MVCC (Snapshot Isolation) prevents most anomalies but not write skew. **Serializable Snapshot Isolation (SSI)** [@cahill2008ssi; @ports2012ssi] adds detection for serialization conflicts.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                  Serializable Snapshot Isolation (SSI)                   │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Core idea: Track read-write dependencies, detect "dangerous structures" │
+│                                                                          │
+│  Dangerous structure (potential cycle):                                  │
+│                                                                          │
+│       T1 ────rw────► T2                                                  │
+│        ▲              │                                                  │
+│        │              │                                                  │
+│        └────rw────────┘                                                  │
+│                                                                          │
+│  rw = "read-write dependency" (T1 read something T2 later wrote)         │
+│                                                                          │
+│  When dangerous structure detected:                                      │
+│    - Abort one of the transactions                                       │
+│    - Application retries                                                 │
+│    - Serializable execution guaranteed                                   │
+│                                                                          │
+│  PostgreSQL SSI (since 9.1):                                             │
+│    - Tracks SIREAD locks (predicate locks on reads)                      │
+│    - Detects rw-antidependencies                                         │
+│    - Aborts on potential conflict                                        │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**SSI performance characteristics**:
+
+| Metric | Snapshot Isolation | SSI |
+|--------|-------------------|-----|
+| Read performance | Baseline | ~2% overhead (predicate tracking) |
+| Write performance | Baseline | ~5-10% overhead |
+| Abort rate | Low | Higher (false positives possible) |
+| Correctness | Most anomalies | Full serializability |
+
+**When to use SSI**:
+
+- Financial transactions where correctness is paramount
+- Inventory systems (double-booking prevention)
+- Any "check-then-act" pattern susceptible to write skew
+
+```sql
+-- PostgreSQL: Enable serializable isolation
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+
+-- Application must handle serialization failures
+BEGIN;
+  -- your transaction logic
+COMMIT;
+-- On error 40001 (serialization_failure): Retry entire transaction
+```
+
+# Distributed Transactions
+
+Single-node transactions are well-understood. Distributed transactions add network partitions, partial failures, and coordination overhead.
+
+## Two-Phase Commit (2PC)
+
+The classic protocol for atomic commits across multiple nodes.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      Two-Phase Commit (2PC)                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Phase 1: Prepare                         Phase 2: Commit                │
+│  ────────────────                         ───────────────                │
+│                                                                          │
+│  Coordinator          Participants        Coordinator          Participants│
+│       │                   │  │  │              │                   │  │  │
+│       │────Prepare───────►│  │  │              │                   │  │  │
+│       │────Prepare──────────►│  │              │                   │  │  │
+│       │────Prepare─────────────►│              │                   │  │  │
+│       │                   │  │  │              │                   │  │  │
+│       │◄───Vote Yes───────│  │  │              │                   │  │  │
+│       │◄───Vote Yes─────────│  │              │                   │  │  │
+│       │◄───Vote Yes────────────│              │                   │  │  │
+│       │                   │  │  │              │                   │  │  │
+│       │                   │  │  │              │────Commit────────►│  │  │
+│       │                   │  │  │              │────Commit───────────►│  │
+│       │                   │  │  │              │────Commit──────────────►│
+│       │                   │  │  │              │                   │  │  │
+│       │                   │  │  │              │◄───Ack────────────│  │  │
+│       │                   │  │  │              │◄───Ack──────────────│  │
+│       │                   │  │  │              │◄───Ack─────────────────│
+│                                                                          │
+│  Participant states:                                                     │
+│    WORKING → PREPARED → COMMITTED                                        │
+│                ↓                                                         │
+│            (if any vote No or timeout) → ABORTED                         │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 2PC as State Machines
+
+Both coordinator and participants follow strict state machines (see [Chapter 17](17-state-machines.qmd) for more on state machines):
+
+```
+Coordinator State Machine:
+┌──────────┐    Start     ┌─────────────┐    All Yes    ┌───────────┐
+│  INIT    ├─────────────►│  WAITING    ├──────────────►│ COMMITTED │
+└──────────┘              └──────┬──────┘               └───────────┘
+                                 │
+                           Any No/Timeout
+                                 │
+                                 ▼
+                          ┌───────────┐
+                          │  ABORTED  │
+                          └───────────┘
+
+Participant State Machine:
+┌──────────┐   Prepare    ┌───────────┐    Commit     ┌───────────┐
+│ WORKING  ├─────────────►│ PREPARED  ├──────────────►│ COMMITTED │
+└──────────┘              └─────┬─────┘               └───────────┘
+     │                          │
+     │ Abort                    │ Abort
+     ▼                          ▼
+┌───────────┐             ┌───────────┐
+│  ABORTED  │◄────────────┤  ABORTED  │
+└───────────┘             └───────────┘
+```
+
+The **critical insight**: in the PREPARED state, participants have voted YES but don't know the final decision. This is the "uncertainty window" where coordinator failure causes blocking.
+
+### The Blocking Problem
+
+2PC has a critical flaw: if the coordinator fails after sending "Prepare" but before sending "Commit", participants are stuck in PREPARED state, holding locks.
+
+```
+Timeline of coordinator failure:
+
+T=0: Coordinator sends PREPARE to all
+T=1: All participants vote YES, enter PREPARED state
+T=2: Coordinator receives votes, decides COMMIT
+T=3: Coordinator crashes before sending COMMIT
+...
+T=???: Participants stuck in PREPARED
+        - Cannot commit (might coordinator abort?)
+        - Cannot abort (might coordinator have committed?)
+        - Holding locks, blocking other transactions
+```
+
+**Recovery options**:
+
+1. **Wait for coordinator recovery**: May take minutes/hours
+2. **Timeout and abort**: Risk inconsistency if coordinator committed
+3. **Three-phase commit (3PC)**: Adds extra round, still not partition-tolerant
+4. **Consensus-based commit**: Modern approach (see below)
+
+### 2PC Latency Cost
+
+```
+2PC minimum latency = 2 × network RTT + fsync time
+
+Example (same datacenter):
+  Prepare RTT: 1ms
+  Commit RTT: 1ms
+  Coordinator fsync: 2ms
+  Participant fsync (×2): 4ms
+  ─────────────────────────
+  Total: ~8ms minimum
+
+Example (cross-datacenter, 50ms RTT):
+  Prepare RTT: 50ms
+  Commit RTT: 50ms
+  Coordinator fsync: 2ms
+  Participant fsync (×2): 4ms
+  ─────────────────────────
+  Total: ~106ms minimum
+```
+
+**Latency impact**: 2PC adds 10-50ms in same datacenter, 100-200ms cross-datacenter.
+
+## Consensus-Based Transactions
+
+Modern distributed databases (CockroachDB, Spanner, TiDB) replace 2PC coordination with consensus protocols.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                 Consensus-Based Distributed Transactions                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  CockroachDB Architecture:                                               │
+│                                                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐     │
+│  │                         SQL Layer                                │     │
+│  └─────────────────────────────────┬───────────────────────────────┘     │
+│                                    │                                     │
+│  ┌─────────────────────────────────▼───────────────────────────────┐     │
+│  │                   Transaction Layer                              │     │
+│  │              (Serializable isolation via SSI)                    │     │
+│  └─────────────────────────────────┬───────────────────────────────┘     │
+│                                    │                                     │
+│  ┌───────────────┬─────────────────┼─────────────────┬─────────────┐     │
+│  │               │                 │                 │             │     │
+│  ▼               ▼                 ▼                 ▼             │     │
+│  ┌─────┐       ┌─────┐       ┌─────┐       ┌─────┐               │     │
+│  │Range│       │Range│       │Range│       │Range│  ...          │     │
+│  │  1  │       │  2  │       │  3  │       │  4  │               │     │
+│  └──┬──┘       └──┬──┘       └──┬──┘       └──┬──┘               │     │
+│     │             │             │             │                   │     │
+│  ┌──▼──┐       ┌──▼──┐       ┌──▼──┐       ┌──▼──┐               │     │
+│  │Raft │       │Raft │       │Raft │       │Raft │  (Each range   │     │
+│  │Group│       │Group│       │Group│       │Group│   has its own  │     │
+│  └─────┘       └─────┘       └─────┘       └─────┘   Raft group)  │     │
+│                                                                          │
+│  Cross-range transaction:                                                │
+│    1. Transaction writes to multiple ranges                              │
+│    2. Each range has independent Raft consensus                          │
+│    3. Parallel Raft commits with transaction record                      │
+│    4. Write intents + transaction record = atomicity                     │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key innovation**: Raft consensus replaces 2PC coordinator. The Raft leader is replicated, eliminating single-point-of-failure.
+
+**Spanner's TrueTime**: Google Spanner uses synchronized atomic clocks to enable lock-free reads of historical data. External consistency guaranteed within clock uncertainty (~7ms).
+
+**Performance comparison**:
+
+| Approach | Latency (same DC) | Latency (cross-DC) | Availability |
+|----------|-------------------|--------------------|--------------|
+| 2PC | 10-50ms | 100-200ms | Coordinator is SPOF |
+| Raft + Parallel Commit | 5-15ms | 50-150ms | Survives minority failure |
+
+## The Saga Pattern
+
+For long-running transactions or microservices, the Saga pattern provides eventual consistency without distributed locking.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           Saga Pattern                                   │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Forward actions:                    Compensating actions:               │
+│  ────────────────                    ────────────────────                │
+│                                                                          │
+│  1. Reserve inventory ─────────────► 1. Release inventory               │
+│  2. Charge payment    ─────────────► 2. Refund payment                  │
+│  3. Ship order        ─────────────► 3. Cancel shipment                 │
+│                                                                          │
+│  Success path:                                                           │
+│    T1 ──► T2 ──► T3 ──► Complete                                         │
+│                                                                          │
+│  Failure at T3:                                                          │
+│    T1 ──► T2 ──► T3(fail) ──► C2 ──► C1 ──► Rolled back                  │
+│                                                                          │
+│  Two styles:                                                             │
+│                                                                          │
+│  Choreography:                  Orchestration:                           │
+│  ┌─────┐   ┌─────┐   ┌─────┐   ┌─────────────┐                           │
+│  │Svc A│──►│Svc B│──►│Svc C│   │ Orchestrator│                           │
+│  └─────┘   └─────┘   └─────┘   └──────┬──────┘                           │
+│   (events between services)          │                                   │
+│                                 ┌────┬┴───┬────┐                         │
+│                                 ▼    ▼    ▼    ▼                         │
+│                               Svc A Svc B Svc C                          │
+│                               (central coordinator)                      │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Saga requirements**:
+
+1. **Compensating transactions**: Every action needs an "undo" action
+2. **Idempotency**: Actions may be retried; must handle duplicates
+3. **Eventual consistency**: System may be temporarily inconsistent
+
+**When to use Sagas**:
+
+| Use Case | Saga Appropriate? |
+|----------|-------------------|
+| Multi-service business transaction | ✓ Yes |
+| Long-running process (hours/days) | ✓ Yes |
+| Single database transaction | ✗ Use ACID |
+| Requires immediate consistency | ✗ Use 2PC/Raft |
+| Simple request-response | ✗ Overkill |
+
+# Exactly-Once Semantics
+
+In distributed systems, messages can be lost, duplicated, or delivered out of order. **Exactly-once semantics** guarantees each logical operation happens exactly once.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      Delivery Guarantee Spectrum                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  At-most-once          At-least-once           Exactly-once              │
+│  ─────────────         ─────────────           ────────────              │
+│  Fire and forget       Retry until ack         Deduplicate + retry       │
+│  May lose messages     May duplicate           Guaranteed single         │
+│  Simplest              Most common             Most complex              │
+│                                                                          │
+│  Implementation:       Implementation:         Implementation:           │
+│  - Send once           - Retry with timeout    - Idempotent producer     │
+│  - No retry            - Ack required          - Transaction + dedup     │
+│                        - Consumer tracks       - Consumer idempotency    │
+│                          offset                                          │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Kafka's Exactly-Once Implementation
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Kafka Exactly-Once Semantics                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Producer side (Idempotent Producer):                                    │
+│  ──────────────────────────────────                                      │
+│  - Producer ID (PID) assigned on init                                    │
+│  - Sequence number per partition                                         │
+│  - Broker deduplicates by (PID, partition, sequence)                     │
+│                                                                          │
+│  ┌─────────────┐                    ┌─────────────┐                      │
+│  │   Producer  │   msg(seq=5)       │    Broker   │                      │
+│  │   PID=42    │──────────────────► │   Dedup:    │                      │
+│  │             │   msg(seq=5) retry │   seq ≤ 5?  │                      │
+│  │             │──────────────────► │   → reject  │                      │
+│  └─────────────┘                    └─────────────┘                      │
+│                                                                          │
+│  Transactional writes (cross-partition atomicity):                       │
+│  ─────────────────────────────────────────────────                       │
+│  1. Producer begins transaction                                          │
+│  2. Writes to multiple partitions with transaction ID                    │
+│  3. On commit: Writes "commit marker" to all partitions                  │
+│  4. Consumers with read_committed see only committed data                │
+│                                                                          │
+│  Performance cost:                                                       │
+│    Idempotent producer: ~3-5% throughput overhead                        │
+│    Transactions: ~5-10% throughput overhead                              │
+│    End-to-end exactly-once: 3-5× latency increase                        │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Idempotency as an Alternative
+
+Often simpler than transactional exactly-once: make operations idempotent.
+
+```
+Non-idempotent:
+  incrementCounter(+1)    -- If retried, counter goes up twice
+
+Idempotent:
+  setCounter(value=42, requestId="abc123")
+  -- Repeated calls with same requestId are no-ops
+```
+
+**Idempotency techniques**:
+
+| Technique | Example | Trade-off |
+|-----------|---------|-----------|
+| Request ID deduplication | Store request IDs for 24h | Storage for IDs |
+| Natural idempotency | `SET balance = 100` vs `ADD 10` | Requires rethinking ops |
+| Conditional writes | `UPDATE ... WHERE version = N` | Retry logic needed |
+| Event sourcing | Append-only events with IDs | Architectural change |
+
+# Trade-off Summary
+
+## Single-Node Transactions
+
+| Mechanism | Throughput | Latency | Correctness | Complexity |
+|-----------|------------|---------|-------------|------------|
+| 2PL Serializable | Low | High (lock waits) | Highest | Low |
+| MVCC Read Committed | High | Low | Medium | Medium |
+| MVCC Snapshot Isolation | High | Low | High | Medium |
+| SSI Serializable | High | Medium | Highest | High |
+
+## Distributed Transactions
+
+| Approach | Latency | Availability | Consistency | Use Case |
+|----------|---------|--------------|-------------|----------|
+| 2PC | 10-50ms | Low (SPOF) | Strong | Legacy systems |
+| Raft/Paxos | 5-15ms | High | Strong | Modern databases |
+| Saga | Varies | High | Eventual | Microservices |
+| Idempotent | Lowest | Highest | Application-defined | Stateless services |
+
+## Choosing an Isolation Level
+
+```
+Decision tree:
+
+1. Can you tolerate stale reads?
+   └─ Yes → Read Committed (default for most)
+   └─ No → Continue
+
+2. Do you have check-then-act patterns (write skew risk)?
+   └─ No → Snapshot Isolation / Repeatable Read
+   └─ Yes → Continue
+
+3. Can you handle retry logic for serialization failures?
+   └─ Yes → Serializable (SSI)
+   └─ No → Snapshot Isolation + application-level locks
+```
+
+# Real-World Implementations
+
+## PostgreSQL
+
+- **Default**: Read Committed with MVCC
+- **Serializable**: SSI (since 9.1)
+- **MVCC**: Heap-based with xmin/xmax, VACUUM for cleanup
+- **Strengths**: Excellent SSI implementation, mature
+
+## MySQL InnoDB
+
+- **Default**: Repeatable Read with MVCC
+- **Serializable**: Gap locking (SELECT ... FOR SHARE/UPDATE)
+- **MVCC**: Undo log-based, purge threads for cleanup
+- **Strengths**: Well-optimized for OLTP
+
+## CockroachDB
+
+- **Only option**: Serializable (SSI)
+- **Distributed**: Multi-Raft with parallel commit
+- **Philosophy**: Correctness over configurability
+- **Strengths**: True distributed serializability
+
+## Spanner
+
+- **Isolation**: External consistency (stronger than serializable)
+- **Innovation**: TrueTime for lock-free historical reads
+- **Distributed**: Paxos-based replication
+- **Strengths**: Global consistency with low latency
+
+# Conclusion: Transactions as Composed Primitives
+
+Transactions demonstrate primitive composition perfectly:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                   Transaction = Composed Primitives                      │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Atomicity      = WAL + Undo/Redo logic                                  │
+│  Consistency    = Constraints + Application logic                        │
+│  Isolation      = MVCC or 2PL or OCC                                     │
+│  Durability     = WAL + fsync + Replication                              │
+│                                                                          │
+│  Distributed    = Consensus (Raft/Paxos) + Coordination (2PC/Saga)       │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+The RUM Conjecture applies here too:
+
+- **Read overhead**: MVCC adds version lookups; 2PL adds lock checks
+- **Update overhead**: WAL writes; lock acquisition; version creation
+- **Memory overhead**: Version storage; lock tables; undo logs
+
+There is no "best" transaction implementation—only trade-offs appropriate for your workload. High-contention OLTP may prefer locking. Read-heavy analytics may prefer snapshot isolation. Distributed microservices may prefer sagas with eventual consistency.
+
+Understanding these primitives lets you reason about why CockroachDB chose serializable-only, why PostgreSQL defaults to Read Committed, and why Kafka's exactly-once requires significant overhead. The mechanisms differ, but they're all composing the same fundamental primitives.
+
+# Exercises
+
+## Conceptual Questions
+
+1. **ACID Trade-offs**: A startup is building a social media feed. They're debating between PostgreSQL (Read Committed default) and CockroachDB (Serializable only). What are the trade-offs? Which would you recommend for a "likes" counter that doesn't need to be perfectly accurate vs. a payment system?
+
+2. **Isolation Level Selection**: For each scenario, choose the appropriate isolation level and justify:
+   - a) Analytics dashboard reading historical data
+   - b) Inventory management for an e-commerce checkout
+   - c) Bank transfer between accounts
+   - d) User session management
+
+3. **MVCC vs 2PL**: Explain why MVCC dominates in web applications. Under what workload would 2PL outperform MVCC?
+
+## Design Exercises
+
+4. **Write Skew Prevention**: Design a doctor on-call scheduling system where at least one doctor must always be on call. Two doctors trying to go off-call simultaneously could violate this constraint. How would you prevent this using:
+   - a) Application-level locking
+   - b) Database constraints
+   - c) Serializable isolation
+
+   Compare the trade-offs of each approach.
+
+5. **Saga Design**: Design a saga for an e-commerce order that:
+   - Reserves inventory
+   - Charges payment
+   - Schedules shipping
+   - Sends confirmation email
+
+   Define the compensating transactions for each step. What happens if shipping fails after payment succeeds? Draw the flow for both success and failure cases.
+
+6. **Distributed Transaction Architecture**: You're building a globally distributed database like CockroachDB. Design the transaction commit protocol for a transaction that writes to three shards in different datacenters. How do you ensure atomicity? What's the expected latency?
+
+## Analysis Exercises
+
+7. **Latency Calculation**: Calculate the minimum commit latency for:
+   - a) Local transaction with synchronous WAL (fsync: 2ms)
+   - b) Transaction replicated to 2 followers in same DC (RTT: 1ms each)
+   - c) 2PC transaction across 3 datacenters (RTT: 50ms)
+
+   What percentage of latency is due to coordination vs. durability?
+
+8. **MVCC Garbage Collection**: A PostgreSQL database has:
+   - 10 million rows updated 10 times/day each
+   - Average row size: 500 bytes
+   - MVCC overhead: 23 bytes/version
+
+   If VACUUM runs every hour, how much dead tuple storage accumulates between runs? What's the space amplification factor?
+
+9. **Exactly-Once Overhead**: Your Kafka producer sends 100,000 messages/second. Compare throughput and latency for:
+   - At-least-once delivery (acks=1)
+   - Exactly-once (idempotent producer + transactions)
+
+   Use the numbers from this chapter to estimate the overhead.
+
+---
+
+*Next: [Caching Strategies — The Performance Multiplier](09-caching.qmd)*

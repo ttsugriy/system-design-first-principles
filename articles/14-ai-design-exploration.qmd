@@ -487,6 +487,184 @@ Most production systems use hybrid designs:
 
 This provides the benefits of AI assistance while maintaining reliability.
 
+# Practical AI Tools for System Design (2025)
+
+The landscape has evolved significantly. Here's what you can use today:
+
+## LLMs for Design Exploration
+
+Large language models like Claude and GPT-4 have become practical tools for system design work:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                   LLM-Assisted Design Workflow                           │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  1. Requirements Analysis                                                │
+│     "Given these requirements, what are the key design decisions?"       │
+│     → LLM identifies trade-offs you might have missed                    │
+│                                                                          │
+│  2. Architecture Review                                                  │
+│     "Review this architecture for scalability bottlenecks"               │
+│     → LLM applies patterns from training on system design literature     │
+│                                                                          │
+│  3. Trade-off Exploration                                                │
+│     "Compare LSM-tree vs B-tree for this workload profile"               │
+│     → LLM synthesizes knowledge from papers and production experience    │
+│                                                                          │
+│  4. Configuration Guidance                                               │
+│     "What RocksDB settings for 80% reads, 20% writes, 1TB data?"         │
+│     → LLM suggests starting points based on similar deployments          │
+│                                                                          │
+│  5. Failure Mode Analysis                                                │
+│     "What happens if the leader node fails in this design?"              │
+│     → LLM traces failure propagation through the system                  │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Strengths of LLMs for system design**:
+- Breadth of knowledge across databases, distributed systems, and infrastructure
+- Can reason about trade-offs in natural language
+- Available 24/7, no setup required
+- Excellent for brainstorming and catching blind spots
+
+**Limitations**:
+- No access to your actual system metrics
+- May hallucinate specific version numbers or API details
+- Cannot run benchmarks or validate performance claims
+- Knowledge cutoff means newest tools may be missing
+
+**Best practice**: Use LLMs as a "senior engineer sounding board," not as a source of ground truth. Validate recommendations against documentation and benchmarks.
+
+## Database Auto-Tuning Services
+
+Cloud providers now offer built-in AI optimization:
+
+| Provider | Service | Capabilities | Automation Level |
+|----------|---------|--------------|------------------|
+| AWS | Aurora ML Insights | Query analysis, index recommendations | Advisory |
+| Azure | SQL Automatic Tuning | Index creation, query plan correction | Automatic (optional) |
+| Google Cloud | Spanner Query Insights | Query analysis, statistics | Advisory |
+| CockroachDB | SQL Tuning | Index recommendations, statistics | Advisory |
+| PlanetScale | Insights | Query patterns, indexing suggestions | Advisory |
+
+**Production example**:
+
+```sql
+-- Azure SQL Automatic Tuning
+ALTER DATABASE [MyDB] SET AUTOMATIC_TUNING = AUTO;
+
+-- Automatically:
+-- - Creates beneficial indexes
+-- - Drops unused indexes
+-- - Fixes regressed query plans
+```
+
+## Open-Source ML Tools for Databases
+
+| Tool | Purpose | Maturity |
+|------|---------|----------|
+| **OtterTune** | PostgreSQL/MySQL configuration tuning | Commercial + OSS |
+| **Bao** | PostgreSQL query optimization with RL | Research → Production |
+| **ALEX** | Learned index structure | Research library |
+| **PGTune** | Configuration recommendations | Production (rules + data) |
+| **pg_hint_plan** | Query hints (can be ML-driven) | Production |
+
+**Using Bao for query optimization**:
+
+```python
+# Bao learns which query plans work best for your workload
+# After training on query executions:
+
+# PostgreSQL with Bao extension
+SET enable_bao = on;
+SET bao_num_arms = 5;  # Number of alternative plans to consider
+
+# Bao will:
+# 1. Generate multiple query plans
+# 2. Use ML model to predict best one
+# 3. Fall back to traditional optimizer if uncertain
+```
+
+## Practical Workflow: AI-Assisted Database Design
+
+Here's a realistic workflow combining these tools:
+
+```
+Step 1: Initial Design (LLM-assisted)
+──────────────────────────────────────
+"I need a database for 100M users, 10K writes/sec,
+50K reads/sec, with strong consistency for transactions"
+
+→ LLM suggests: PostgreSQL with read replicas, or CockroachDB
+→ LLM identifies: Need to consider connection pooling,
+   partition strategy, index design
+
+Step 2: Configuration (Auto-tuning tools)
+─────────────────────────────────────────
+# Use PGTune or OtterTune for initial config
+$ pgtune -i /etc/postgresql/postgresql.conf \
+         --db-type=oltp \
+         --total-memory=64GB \
+         --max-connections=500
+
+Step 3: Index Optimization (Cloud AI or Bao)
+────────────────────────────────────────────
+# Enable automatic tuning
+# Or run workload analyzer to get recommendations
+
+SELECT * FROM pg_stat_user_indexes
+WHERE idx_scan = 0;  -- Unused indexes
+
+Step 4: Continuous Monitoring (ML-based anomaly detection)
+──────────────────────────────────────────────────────────
+# Use Datadog, New Relic, or custom ML for:
+# - Query latency anomaly detection
+# - Workload pattern changes
+# - Capacity prediction
+
+Step 5: Review & Iterate (LLM + human)
+──────────────────────────────────────
+"Here are our current metrics. What optimizations should we consider?"
+→ LLM analyzes patterns, suggests next steps
+→ Human validates against business context
+```
+
+## What's Not Ready Yet
+
+Be skeptical of claims about:
+
+| Claim | Reality |
+|-------|---------|
+| "Fully autonomous database" | Still requires human oversight for schema changes, major config |
+| "Learned indexes in production" | Limited to specific use cases; B-trees still dominant |
+| "AI writes optimal queries" | Good for simple cases; complex queries need human review |
+| "Zero-DBA operations" | Reduces routine work; doesn't eliminate need for expertise |
+
+## Recommended Approach
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    AI Tool Selection Matrix                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Task                          Best Tool              Human Role         │
+│  ──────────────────────────────────────────────────────────────────────  │
+│  Initial design                LLM (Claude/GPT-4)     Decision maker     │
+│  Configuration tuning          OtterTune/PGTune       Validator          │
+│  Index recommendations         Cloud AI / Bao         Approver           │
+│  Query optimization            Bao / Query hints      Reviewer           │
+│  Capacity planning             ML forecasting         Planner            │
+│  Anomaly detection             ML monitoring          Responder          │
+│  Schema design                 LLM + human            Designer           │
+│  Disaster recovery planning    LLM + human            Owner              │
+│                                                                          │
+│  Key principle: AI recommends, human decides for anything irreversible   │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
 # Tools and Systems
 
 ## Production-Ready
@@ -530,6 +708,53 @@ AI helps with:
 The best designs combine **human insight** (understanding requirements, making architectural decisions) with **machine optimization** (parameter tuning, workload adaptation, pattern recognition).
 
 In the next chapter, we'll look at the ultimate extension of this idea: systems that design themselves.
+
+# Exercises
+
+## Conceptual Questions
+
+1. **Learned Index Trade-offs**: A learned index provides 70% faster lookups than a B-tree for uniformly distributed keys. However, for a heavily skewed distribution (90% of queries hit 10% of keys), the B-tree performs 20% better. Explain why this happens and when you would choose each approach.
+
+2. **AI-Assisted vs. Automated**: For each task, explain whether you'd use AI as an advisor (human makes final decision) or as an automated system (AI executes directly):
+   - a) Adding an index to a production database
+   - b) Adjusting buffer pool size during off-peak hours
+   - c) Choosing between PostgreSQL and CockroachDB for a new project
+   - d) Rolling back a query plan that shows 10× regression
+
+3. **Training Data Requirements**: OtterTune requires running benchmark workloads before making recommendations. Explain why this is necessary. What happens if the benchmark workload doesn't match production? How would you design a system that works without explicit benchmarks?
+
+## Design Exercises
+
+4. **LLM-Assisted Design Session**: You're designing a recommendation system that needs to:
+   - Store 1 billion user-item interactions
+   - Support real-time recommendations (P99 < 50ms)
+   - Handle 100K recommendation requests/second
+   - Update models hourly with new data
+
+   Write the prompts you would use to get useful guidance from an LLM. What follow-up questions would validate the LLM's recommendations?
+
+5. **Hybrid Index Design**: Design a hybrid indexing strategy for an e-commerce catalog where:
+   - 0.1% of products (best sellers) receive 50% of traffic
+   - Product data changes 100 times/day on average
+   - You have 64GB of RAM available for indexes
+
+   How would you combine learned indexes for hot data with traditional indexes for the long tail? What triggers a product moving between tiers?
+
+6. **Auto-Tuning System**: Design an automatic configuration tuning system for PostgreSQL that:
+   - Monitors query performance continuously
+   - Adjusts parameters like `shared_buffers`, `work_mem`, `effective_cache_size`
+   - Avoids oscillation (changing settings back and forth)
+   - Has guardrails to prevent dangerous changes
+
+   Specify the metrics you'd collect, the decision algorithm, and the safety constraints.
+
+## Analysis Exercises
+
+7. **Cardinality Estimation Error**: A traditional query optimizer estimates 1,000 rows for a join; actual result is 1,000,000 rows. This causes a hash join instead of the optimal nested loop. Calculate:
+   - The performance difference (assume hash join: 500ms, optimal nested loop: 50ms)
+   - How a learned optimizer could prevent this by training on actual cardinalities
+
+8. **ML Model Overhead**: A learned index model adds 0.1ms inference time per lookup. The model reduces search from 5 comparisons to 2 comparisons (each comparison: 0.05ms). At what query rate does the ML overhead exceed the comparison savings? Consider: batch inference could reduce per-query overhead to 0.02ms.
 
 ---
 

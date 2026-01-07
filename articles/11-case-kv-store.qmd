@@ -540,6 +540,74 @@ Each layer builds on the previous. Each adds capabilities—and complexity.
 
 The "simple" key-value store isn't simple. It's a composition of storage engines, consensus protocols, distributed coordination, and caching strategies. Understanding these components lets you reason about real systems: why DynamoDB behaves the way it does, why Redis is fast but memory-limited, why etcd prioritizes consistency over latency.
 
+# Exercises
+
+## Design Exercises
+
+1. **Storage Engine Selection**: Your key-value store needs to support:
+   - 90% writes, 10% reads
+   - Keys: user IDs (8 bytes)
+   - Values: JSON documents (average 2KB, max 100KB)
+   - 10 billion records total
+
+   Would you choose B-tree or LSM-tree? Calculate the expected write amplification for each. What changes if the workload becomes 90% reads, 10% writes?
+
+2. **Replication Strategy**: Design the replication strategy for a key-value store that must:
+   - Survive a single datacenter failure
+   - Provide P99 write latency < 50ms
+   - Support read-after-write consistency for the same client
+
+   Specify: replication factor, sync vs async, read routing strategy.
+
+3. **Hot Key Mitigation**: A social media platform stores celebrity user profiles in your KV store. One celebrity has 100 million followers who all request their profile simultaneously after a tweet. Design a solution that:
+   - Handles 1 million requests/second for a single key
+   - Maintains < 10ms P99 latency
+   - Doesn't require pre-knowledge of which keys will be hot
+
+## Analysis Exercises
+
+4. **Partition Calculation**: You need to store 50TB of data with:
+   - 3× replication factor
+   - Maximum 1TB per node (for manageable recovery time)
+   - Hash-based partitioning with consistent hashing
+
+   How many partitions do you need? How many physical nodes? If a node fails, how much data needs to be re-replicated?
+
+5. **Latency Breakdown**: For a read request to a distributed KV store:
+   - Client to coordinator: 1ms
+   - Coordinator to partition leader: 2ms
+   - Bloom filter check: 0.01ms
+   - SSTable read (cache hit 90%): 0.1ms hit, 5ms miss
+   - Response path: same as request path
+
+   Calculate P50 and P99 latency assuming cache hit variability follows the 90% rate.
+
+6. **Consistency Level Trade-offs**: Your KV store has RF=3 and supports consistency levels ONE, QUORUM, ALL. For a workload with:
+   - 100K reads/sec, 10K writes/sec
+   - Current config: QUORUM reads, QUORUM writes
+   - Read latency: 5ms, Write latency: 8ms
+
+   What happens to latency and throughput if you switch to ONE reads, QUORUM writes? What's the staleness window?
+
+## System Design Exercises
+
+7. **TTL Implementation**: Design the TTL (time-to-live) feature for your KV store:
+   - TTL specified per key at write time
+   - Expired keys should not be returned on read
+   - Storage for expired keys should be reclaimed
+
+   Consider: storage overhead, read path changes, background cleanup strategy. How does this interact with compaction in an LSM-tree?
+
+8. **Compare-and-Swap**: Implement CAS (compare-and-swap) semantics:
+   ```
+   CAS(key, expected_value, new_value) → success/failure
+   ```
+
+   How does this work with:
+   - Single-node implementation
+   - Replicated implementation (leader-based)
+   - Partitioned implementation (when CAS spans partitions... or can it?)
+
 ---
 
 *Next: Case Study — Time-Series Database*

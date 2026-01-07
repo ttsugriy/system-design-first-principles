@@ -13,7 +13,7 @@ Distributed systems face a fundamental problem: how do multiple nodes agree on s
 **Consensus** is the answer—a family of protocols that allow a group of nodes to agree on a single value (or sequence of values) despite failures. Consensus powers:
 
 - **Leader election**: Who's in charge?
-- **State machine replication**: Execute operations in the same order everywhere
+- **State machine replication**: Execute operations in the same order everywhere (see [Chapter 17: State Machines](17-state-machines.qmd) for the state machine perspective)
 - **Configuration management**: Agree on cluster membership
 - **Distributed locking**: Coordinate access to shared resources
 
@@ -23,7 +23,7 @@ Without consensus, distributed databases couldn't exist. Every system from Postg
 
 Before diving into solutions, we must understand a fundamental limit.
 
-The **Fischer-Lynch-Paterson (FLP) impossibility theorem** (1985) proves:
+The **Fischer-Lynch-Paterson (FLP) impossibility theorem** [@fischer1985flp] proves:
 
 > In an asynchronous distributed system, it is impossible to guarantee consensus in bounded time if even a single process can crash.
 
@@ -73,7 +73,7 @@ For datacenter systems with trusted nodes, crash failure tolerance is sufficient
 
 # Paxos: The Original
 
-Leslie Lamport's Paxos (1989/1998) was the first practical consensus protocol. It's notoriously difficult to understand—Lamport himself admitted the paper was "Greek" to most readers.
+Leslie Lamport's Paxos [@lamport1998paxos; @lamport2001paxos] was the first practical consensus protocol. It's notoriously difficult to understand—Lamport himself admitted the paper was "Greek" to most readers.
 
 ## Roles
 
@@ -150,7 +150,7 @@ Basic Paxos decides one value. Real systems need to agree on a **sequence** of v
 
 # Raft: Consensus for Humans
 
-Raft (2014) was designed with a single overriding goal: **understandability**. It provides the same guarantees as Multi-Paxos but with a cleaner decomposition.
+Raft [@ongaro2014raft] was designed with a single overriding goal: **understandability**. It provides the same guarantees as Multi-Paxos but with a cleaner decomposition.
 
 ## Core Concepts
 
@@ -175,27 +175,39 @@ Each term has at most one leader. Term numbers detect stale leaders.
 
 ### Leader Election
 
-All nodes start as **followers**. If a follower receives no heartbeat within the **election timeout** (typically 150-300ms, randomized), it becomes a **candidate**:
+Raft nodes form a **finite state machine** with three states. All nodes start as **followers**. If a follower receives no heartbeat within the **election timeout** (typically 150-300ms, randomized), it becomes a **candidate**:
 
 ```
-                    ┌─────────────────────────────┐
-                    │                             │
-                    ▼                             │
-               ┌────────┐    timeout         ┌────────┐
-Start ────────►│Follower├───────────────────►│Candidate│
-               └────────┘                    └────────┘
-                    ▲                             │
-                    │        vote denied or       │
-                    │        higher term          │
-                    │                             │
-                    │                        vote granted
-                    │                        from majority
-                    │                             │
-                    │                             ▼
-                    │                        ┌────────┐
-                    └────────────────────────┤ Leader │
-                       discovers higher term └────────┘
+                      Raft Node State Machine
+                    ┌─────────────────────────────────────────────────┐
+                    │                                                 │
+                    ▼                                                 │
+               ┌────────┐    timeout (no heartbeat)              ┌────────┐
+Start ────────►│Follower├───────────────────────────────────────►│Candidate│
+               └────────┘                                        └────────┘
+                    ▲                                                 │
+                    │        vote denied or                           │
+                    │        discovers higher term                    │
+                    │                                                 │
+                    │                                            vote granted
+                    │                                            from majority
+                    │                                                 │
+                    │                                                 ▼
+                    │                                            ┌────────┐
+                    └────────────────────────────────────────────┤ Leader │
+                       discovers higher term (steps down)        └────────┘
 ```
+
+Each **transition** has a well-defined **trigger** and **action**:
+
+| Transition | Trigger | Action |
+|------------|---------|--------|
+| Follower → Candidate | Election timeout | Increment term, vote for self, send RequestVote |
+| Candidate → Leader | Received majority votes | Begin sending heartbeats |
+| Candidate → Follower | Discovered higher term | Recognize new term |
+| Leader → Follower | Discovered higher term | Step down immediately |
+
+This state machine formalization makes Raft easier to reason about and verify. For a deep dive on state machines in system design, see [Chapter 17: State Machines](17-state-machines.qmd).
 
 **Election process**:
 
@@ -512,6 +524,55 @@ Write Latency = max(RTT + fsync) across quorum
 3. **Ignoring partitions**: Test minority partition behavior
 4. **Manual config changes**: Use proper joint consensus, not manual intervention
 5. **Ignoring disk**: fsync is often the bottleneck—use SSDs
+
+# Exercises
+
+## Conceptual Questions
+
+1. **Quorum Math**: A Raft cluster has 7 nodes. During a network partition, 3 nodes are in partition A and 4 nodes are in partition B.
+   - Which partition can elect a leader and continue operating?
+   - What happens if 2 more nodes in partition B crash?
+   - What is the minimum number of nodes that must be available for the cluster to make progress?
+
+2. **FLP Implications**: The FLP impossibility result proves consensus cannot be guaranteed in asynchronous systems. Explain how Raft "works around" this impossibility. What assumptions does Raft make that FLP prohibits?
+
+3. **Leader Bottleneck**: All writes in Raft go through the leader. Explain why this creates a bottleneck. List three strategies to improve write throughput in a Raft-based system.
+
+## Analysis Exercises
+
+4. **Latency Calculation**: A Raft cluster has 5 nodes across 3 datacenters:
+   - DC1 (primary): Node A (leader), Node B - RTT between them: 0.5ms
+   - DC2: Node C, Node D - RTT to DC1: 30ms
+   - DC3: Node E - RTT to DC1: 50ms
+
+   Calculate the minimum commit latency for a write (assuming instant fsync). Which nodes form the quorum?
+
+5. **Election Timeout Tuning**: Your Raft cluster experiences frequent leader elections during normal operation. The current settings are:
+   - Heartbeat interval: 50ms
+   - Election timeout: 100-150ms (random)
+   - Network RTT: 20-80ms (variable)
+
+   Analyze the problem and propose new settings. What is the trade-off between fast failover and stability?
+
+6. **Multi-Raft Overhead**: CockroachDB uses Multi-Raft with thousands of Raft groups. Each 64MB range has its own Raft group.
+   - A cluster has 100 nodes and 50,000 ranges. How many Raft groups is each node participating in on average?
+   - Each heartbeat is 100 bytes. Calculate the heartbeat bandwidth per node if heartbeats are sent every 100ms.
+
+## Design Exercises
+
+7. **Read Linearizability**: Design three different strategies for linearizable reads in Raft:
+   - Leader-based (lease reads)
+   - Quorum-based
+   - ReadIndex-based
+
+   Compare their latency, throughput, and failure mode characteristics.
+
+8. **Membership Change**: A 5-node cluster needs to replace all nodes (rolling upgrade to new hardware). Design a safe sequence of operations using Raft joint consensus. What invariants must be maintained throughout?
+
+9. **Cross-Region Consensus**: You're deploying a Raft cluster across 3 regions (US-East, US-West, EU-West) for global availability. Analyze the trade-offs between:
+   - Placing the leader in the region with most writes
+   - Using witness nodes (non-voting replicas)
+   - Implementing region-aware quorums
 
 # Conclusion: The Price of Agreement
 

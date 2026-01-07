@@ -630,6 +630,42 @@ Caching is not just "add Redis and go." Effective caching requires understanding
 
 The math is compelling: 95% hit rate gives 17× speedup. The engineering is challenging: cache invalidation remains hard. But the effort is worthwhile—caching is the single most effective performance optimization for most systems.
 
+# Exercises
+
+## Conceptual Questions
+
+1. **Hit Rate Impact**: Your cache has a 70% hit rate with 1ms cache latency and 200ms backend latency. Calculate the average latency. If you improve hit rate to 90%, what's the new average latency? What percentage improvement is that?
+
+2. **Eviction Policy Choice**: You're building a cache for a news website. Articles published in the last hour receive 80% of traffic. Would you choose LRU or LFU? Why?
+
+3. **Cache Placement**: A mobile app displays user profiles. The same user's profile is viewed multiple times per session, but different users view different profiles. Where should caching happen—client-side, CDN, application cache, or distributed cache? Justify your answer.
+
+## Design Exercises
+
+4. **Thundering Herd Prevention**: Design a cache system for a flash sale where a product page gets 100,000 requests/second at launch. The cache TTL is 60 seconds. How would you prevent thundering herd at expiration? Write pseudocode for your solution.
+
+5. **Multi-Tier Cache Design**: Design a caching strategy for an e-commerce product catalog with:
+   - 10 million products
+   - Top 1% of products get 50% of traffic
+   - Products update ~10 times/day on average
+   - Read latency target: P99 < 50ms
+
+   Specify: cache layers, TTLs, eviction policies, and invalidation strategy.
+
+6. **Cache Consistency**: Your system uses cache-aside with a distributed cache. A race condition causes stale data: Thread A reads DB (v1), Thread B updates DB (v2) and deletes cache, Thread A writes v1 to cache. Design a solution that prevents this while minimizing added latency.
+
+## Analysis Exercises
+
+7. **Cache Sizing**: You need to cache user sessions for an application with:
+   - 10 million daily active users
+   - Average session size: 2KB
+   - Sessions accessed 10 times/hour on average
+   - Peak concurrent sessions: 2 million
+
+   How much memory do you need for a distributed cache? What hit rate would you expect with 80% of this memory?
+
+8. **TTL Trade-offs**: A financial dashboard displays stock portfolio values. Users expect near-real-time data. The backend database can handle 10,000 queries/second. You have 1 million users, each refreshing every 10 seconds during market hours. What TTL would you set? What's the staleness vs. load trade-off?
+
 ---
 
 *Next: Part III — Composition: Building Systems from Primitives*

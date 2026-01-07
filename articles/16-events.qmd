@@ -1,0 +1,746 @@
+---
+title: "Events as Primitives"
+subtitle: "The Atoms of Change"
+author: "Taras Tsugrii"
+date: today
+bibliography: ../references.bib
+---
+
+# The Missing Primitive
+
+Throughout this book, we've treated data structures, storage engines, and coordination protocols as primitives. But we've been missing something fundamental.
+
+Consider what actually happens in a distributed system:
+
+- A user clicks "Buy Now"
+- A payment processor confirms a charge
+- A sensor reports a temperature reading
+- A timer expires
+- A node detects a failed heartbeat
+
+These aren't requests or responses. They're **events**—immutable facts about things that happened. And they're more fundamental than the services that process them.
+
+# What Is an Event?
+
+An event is a record of something that happened at a specific point in time.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          Anatomy of an Event                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  {                                                                       │
+│    "event_id": "evt_a1b2c3d4",        ← Unique identity                  │
+│    "event_type": "OrderPlaced",       ← What kind of thing happened      │
+│    "timestamp": "2024-01-15T10:30:00Z", ← When it happened               │
+│    "aggregate_id": "order_12345",     ← What entity it relates to        │
+│    "payload": {                       ← The details                      │
+│      "customer_id": "cust_789",                                          │
+│      "items": [...],                                                     │
+│      "total": 149.99                                                     │
+│    },                                                                    │
+│    "metadata": {                      ← Context                          │
+│      "correlation_id": "req_xyz",                                        │
+│      "causation_id": "evt_prev123",                                      │
+│      "user_agent": "mobile-app/2.1"                                      │
+│    }                                                                     │
+│  }                                                                       │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Events Are Immutable Facts
+
+This is the critical insight: **events cannot be changed or deleted**.
+
+| Concept | Mutable? | Example |
+|---------|----------|---------|
+| State | Yes | `account.balance = 150` |
+| Event | No | `Deposited { amount: 50, at: 10:30 }` |
+
+If a customer deposits $50, you don't change the deposit event. If they later withdraw $30, that's a new event. The deposit still happened.
+
+This immutability has profound implications:
+- **Audit trail**: Complete history preserved
+- **Debugging**: Replay events to understand what happened
+- **Recovery**: Reconstruct state from event log
+- **Analytics**: Analyze historical patterns
+
+## Events vs. Commands vs. Queries
+
+Three fundamental operations in any system:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                  Commands, Events, and Queries                           │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  COMMAND                                                                 │
+│  ───────                                                                 │
+│  "Please do this"                                                        │
+│  • Intent to change state                                                │
+│  • May succeed or fail                                                   │
+│  • Imperative: PlaceOrder, WithdrawFunds, ShipPackage                    │
+│                                                                          │
+│           │                                                              │
+│           ▼                                                              │
+│     ┌───────────┐                                                        │
+│     │  System   │                                                        │
+│     │ (decides) │                                                        │
+│     └─────┬─────┘                                                        │
+│           │                                                              │
+│           ▼                                                              │
+│                                                                          │
+│  EVENT                                                                   │
+│  ─────                                                                   │
+│  "This happened"                                                         │
+│  • Fact about past                                                       │
+│  • Cannot fail (already happened)                                        │
+│  • Past tense: OrderPlaced, FundsWithdrawn, PackageShipped               │
+│                                                                          │
+│  ─────────────────────────────────────────────────────────────────────── │
+│                                                                          │
+│  QUERY                                                                   │
+│  ─────                                                                   │
+│  "What is the current state?"                                            │
+│  • Read-only                                                             │
+│  • No side effects                                                       │
+│  • Interrogative: GetOrderStatus, GetAccountBalance                      │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key insight**: Commands express intent; events express outcomes. A command might be rejected (insufficient funds), but an event is a fact.
+
+# The Event Log: Foundation of Event-Driven Systems
+
+An **event log** is an ordered, append-only sequence of events.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           Event Log                                      │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Offset │ Timestamp           │ Event                                    │
+│  ───────┼─────────────────────┼────────────────────────────────────────  │
+│  0      │ 2024-01-15 10:00:00 │ AccountOpened { id: 123, name: "Alice" } │
+│  1      │ 2024-01-15 10:05:00 │ Deposited { id: 123, amount: 100 }       │
+│  2      │ 2024-01-15 10:10:00 │ Deposited { id: 123, amount: 50 }        │
+│  3      │ 2024-01-15 10:15:00 │ Withdrawn { id: 123, amount: 30 }        │
+│  4      │ 2024-01-15 10:20:00 │ Deposited { id: 123, amount: 25 }        │
+│  ───────┴─────────────────────┴────────────────────────────────────────  │
+│                                                                          │
+│  Properties:                                                             │
+│  • Append-only (no updates or deletes)                                   │
+│  • Ordered (total order within partition)                                │
+│  • Durable (survives crashes)                                            │
+│  • Replayable (can reconstruct state at any point)                       │
+│                                                                          │
+│  Current balance = 100 + 50 - 30 + 25 = 145                              │
+│  Balance at offset 2 = 100 + 50 = 150                                    │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Event Logs in Real Systems
+
+The event log pattern appears everywhere:
+
+| System | Event Log Implementation | Purpose |
+|--------|-------------------------|---------|
+| Databases | Write-Ahead Log (WAL) | Durability, recovery |
+| Kafka | Partitioned commit log | Message streaming |
+| Git | Commit history | Version control |
+| Blockchain | Block chain | Distributed ledger |
+| Event stores | EventStoreDB, Axon | Event sourcing |
+
+These are all the same fundamental primitive: an ordered, append-only, durable log.
+
+## Kafka as Event Log
+
+Kafka is the most widely-used event log in production:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         Kafka Topic                                      │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Topic: "orders"                                                         │
+│                                                                          │
+│  Partition 0:  [0][1][2][3][4][5][6] ────► Consumer A                    │
+│                                                                          │
+│  Partition 1:  [0][1][2][3][4] ──────────► Consumer B                    │
+│                                                                          │
+│  Partition 2:  [0][1][2][3][4][5] ───────► Consumer C                    │
+│                                                                          │
+│  Properties:                                                             │
+│  • Total order within partition                                          │
+│  • No order guarantee across partitions                                  │
+│  • Retention: time-based or size-based                                   │
+│  • Replayable: consumers can seek to any offset                          │
+│                                                                          │
+│  Partitioning strategy:                                                  │
+│  • Hash(order_id) → partition                                            │
+│  • All events for same order go to same partition                        │
+│  • Guarantees order per entity                                           │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key design decision**: Partition by entity ID to maintain per-entity ordering while allowing parallel processing.
+
+# Event Sourcing: Events as Source of Truth
+
+Traditional systems store current state:
+
+```sql
+UPDATE accounts SET balance = 145 WHERE id = 123;
+```
+
+**Event sourcing** stores the events that led to current state:
+
+```
+INSERT INTO events (aggregate_id, event_type, data)
+VALUES ('account_123', 'Deposited', '{"amount": 25}');
+```
+
+## Event Sourcing Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     Event Sourcing Architecture                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Commands                                                                │
+│     │                                                                    │
+│     ▼                                                                    │
+│  ┌─────────────────┐                                                     │
+│  │ Command Handler │                                                     │
+│  │                 │                                                     │
+│  │ 1. Load events  │◄───────────────────┐                                │
+│  │ 2. Rebuild state│                    │                                │
+│  │ 3. Validate cmd │                    │                                │
+│  │ 4. Emit events  │                    │                                │
+│  └────────┬────────┘                    │                                │
+│           │                             │                                │
+│           ▼                             │                                │
+│  ┌─────────────────┐                    │                                │
+│  │   Event Store   │────────────────────┘                                │
+│  │                 │                                                     │
+│  │ [e1][e2][e3]... │                                                     │
+│  └────────┬────────┘                                                     │
+│           │                                                              │
+│           │ Subscribe                                                    │
+│           ▼                                                              │
+│  ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐     │
+│  │   Projection 1  │     │   Projection 2  │     │   Projection 3  │     │
+│  │ (Account list)  │     │ (Analytics)     │     │ (Search index)  │     │
+│  └─────────────────┘     └─────────────────┘     └─────────────────┘     │
+│           │                                                              │
+│           ▼                                                              │
+│  ┌─────────────────┐                                                     │
+│  │  Read Database  │◄──────────────────── Queries                        │
+│  └─────────────────┘                                                     │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Rebuilding State from Events
+
+```python
+def get_account_balance(account_id: str) -> Decimal:
+    events = event_store.get_events(aggregate_id=account_id)
+
+    balance = Decimal(0)
+    for event in events:
+        match event.type:
+            case "AccountOpened":
+                balance = event.data["initial_balance"]
+            case "Deposited":
+                balance += event.data["amount"]
+            case "Withdrawn":
+                balance -= event.data["amount"]
+            case "InterestApplied":
+                balance += event.data["amount"]
+
+    return balance
+```
+
+Every time we need current state, we replay all events. This is correct but slow for large event streams.
+
+## Snapshotting: Optimization for Large Event Streams
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        Snapshotting                                      │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Without snapshots:                                                      │
+│  ──────────────────                                                      │
+│  Load time = O(n) where n = number of events                             │
+│  For account with 10,000 transactions: slow                              │
+│                                                                          │
+│  With snapshots:                                                         │
+│  ───────────────                                                         │
+│  Event Log:  [e1][e2]...[e999][e1000][e1001]...[e1050]                    │
+│                            │                                             │
+│                            ▼                                             │
+│  Snapshot:           { version: 1000, balance: 5432.10 }                 │
+│                                                                          │
+│  To load current state:                                                  │
+│    1. Load latest snapshot (version 1000)                                │
+│    2. Replay events after snapshot (1001-1050)                           │
+│    3. Load time = O(events since snapshot)                               │
+│                                                                          │
+│  Snapshot strategy:                                                      │
+│  ──────────────────                                                      │
+│  • Every N events (e.g., every 100)                                      │
+│  • Every T time (e.g., daily)                                            │
+│  • On demand (when load time exceeds threshold)                          │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Snapshot trade-offs**:
+
+| Approach | Load Time | Storage | Complexity |
+|----------|-----------|---------|------------|
+| No snapshots | O(n) | Low | Low |
+| Snapshot every 100 | O(100) | Medium | Medium |
+| Snapshot every event | O(1) | High (2x) | High |
+
+## Projections: Optimized Read Models
+
+Events are optimized for writes (append-only). Queries need different structures:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          Projections                                     │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Event Stream:                                                           │
+│  [OrderPlaced][ItemAdded][ItemAdded][OrderShipped][OrderDelivered]       │
+│                                                                          │
+│  Projection 1: Order Status (for customer portal)                        │
+│  ──────────────────────────────────────────────────                      │
+│  CREATE TABLE order_status (                                             │
+│    order_id VARCHAR PRIMARY KEY,                                         │
+│    status VARCHAR,           -- PLACED, SHIPPED, DELIVERED               │
+│    updated_at TIMESTAMP                                                  │
+│  );                                                                      │
+│                                                                          │
+│  Projection 2: Daily Sales (for analytics)                               │
+│  ─────────────────────────────────────────                               │
+│  CREATE TABLE daily_sales (                                              │
+│    date DATE PRIMARY KEY,                                                │
+│    order_count INT,                                                      │
+│    total_revenue DECIMAL                                                 │
+│  );                                                                      │
+│                                                                          │
+│  Projection 3: Search Index (for product search)                         │
+│  ───────────────────────────────────────────────                         │
+│  Elasticsearch index with denormalized order data                        │
+│                                                                          │
+│  Each projection:                                                        │
+│  • Subscribes to event stream                                            │
+│  • Maintains its own read-optimized view                                 │
+│  • Can be rebuilt by replaying events                                    │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key insight**: Projections are disposable. If corrupted or schema changes, replay events to rebuild.
+
+# CQRS: Separating Reads and Writes
+
+**Command Query Responsibility Segregation** formalizes the separation:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                              CQRS                                        │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│                     ┌───────────────────────────┐                        │
+│                     │         Client            │                        │
+│                     └─────────────┬─────────────┘                        │
+│                                   │                                      │
+│              ┌────────────────────┼────────────────────┐                 │
+│              │                    │                    │                 │
+│              ▼                    │                    ▼                 │
+│     ┌─────────────────┐           │           ┌─────────────────┐        │
+│     │  Command Side   │           │           │   Query Side    │        │
+│     │                 │           │           │                 │        │
+│     │ • Validate      │           │           │ • Denormalized  │        │
+│     │ • Apply rules   │           │           │ • Fast reads    │        │
+│     │ • Emit events   │           │           │ • Multiple views│        │
+│     └────────┬────────┘           │           └────────▲────────┘        │
+│              │                    │                    │                 │
+│              ▼                    │                    │                 │
+│     ┌─────────────────┐           │           ┌─────────────────┐        │
+│     │  Event Store    │───────────┼──────────►│  Read Database  │        │
+│     │  (Source of     │           │           │  (Projections)  │        │
+│     │   Truth)        │           │           │                 │        │
+│     └─────────────────┘           │           └─────────────────┘        │
+│                                   │                                      │
+│                    Eventual Consistency                                  │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## CQRS Trade-offs
+
+| Aspect | Benefit | Cost |
+|--------|---------|------|
+| Read performance | Optimized per use case | Multiple databases to maintain |
+| Write performance | Append-only, fast | Event schema evolution |
+| Consistency | Complete audit trail | Eventual (not immediate) |
+| Flexibility | Add projections anytime | Complexity |
+| Debugging | Replay to any point | Learning curve |
+
+## When to Use CQRS/Event Sourcing
+
+**Good fit**:
+
+- Complex business domains with rich history requirements
+- Audit-critical systems (finance, healthcare, legal)
+- Event-driven architectures (already have events)
+- Systems needing multiple read models
+- Collaborative domains (multiple users editing)
+
+**Poor fit**:
+
+- Simple CRUD applications
+- Systems requiring strong consistency
+- Small teams without event sourcing experience
+- Domains without meaningful events
+
+# Event Schema Evolution
+
+Events are immutable, but schemas change. This is the hardest problem in event sourcing.
+
+## Schema Evolution Strategies
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      Event Schema Evolution                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Strategy 1: Upcasting (transform on read)                               │
+│  ─────────────────────────────────────────                               │
+│                                                                          │
+│  Stored (v1):  { "type": "OrderPlaced", "total": 100 }                   │
+│  Upcast to v2: { "type": "OrderPlaced", "total": 100, "currency": "USD" }│
+│                                                                          │
+│  Pros: No data migration                                                 │
+│  Cons: Complex upcasters accumulate, read-time overhead                  │
+│                                                                          │
+│  ─────────────────────────────────────────────────────────────────────── │
+│                                                                          │
+│  Strategy 2: New Event Type                                              │
+│  ──────────────────────────                                              │
+│                                                                          │
+│  Old: OrderPlaced { total: number }                                      │
+│  New: OrderPlacedV2 { total: number, currency: string }                  │
+│                                                                          │
+│  Pros: Clean separation                                                  │
+│  Cons: Consumers must handle both types forever                          │
+│                                                                          │
+│  ─────────────────────────────────────────────────────────────────────── │
+│                                                                          │
+│  Strategy 3: Event Migration                                             │
+│  ───────────────────────────                                             │
+│                                                                          │
+│  1. Deploy new consumer that handles both v1 and v2                      │
+│  2. Run migration job: read v1, write v2, delete v1                      │
+│  3. Remove v1 handling from consumer                                     │
+│                                                                          │
+│  Pros: Clean final state                                                 │
+│  Cons: Dangerous if events truly immutable, complex migration            │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Backward and Forward Compatibility
+
+Use schema evolution patterns from data serialization:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Compatibility Requirements                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Backward Compatible (new reader, old data):                             │
+│  ───────────────────────────────────────────                             │
+│  • Add optional fields (with defaults)                                   │
+│  • Don't remove fields                                                   │
+│  • Don't change field types                                              │
+│                                                                          │
+│  Forward Compatible (old reader, new data):                              │
+│  ──────────────────────────────────────────                              │
+│  • Ignore unknown fields                                                 │
+│  • Don't require new fields                                              │
+│                                                                          │
+│  Example using JSON Schema / Avro / Protobuf:                            │
+│                                                                          │
+│  // v1                                                                   │
+│  message OrderPlaced {                                                   │
+│    string order_id = 1;                                                  │
+│    int64 total_cents = 2;                                                │
+│  }                                                                       │
+│                                                                          │
+│  // v2 (backward compatible)                                             │
+│  message OrderPlaced {                                                   │
+│    string order_id = 1;                                                  │
+│    int64 total_cents = 2;                                                │
+│    string currency = 3 [default = "USD"];  // New optional field         │
+│  }                                                                       │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+# Event-Driven Architecture Patterns
+
+## Pattern 1: Event Notification
+
+Lightweight: just notify that something happened, don't include all data.
+
+```
+Producer: { "event": "OrderShipped", "order_id": "12345" }
+Consumer: Fetches order details from Order Service if needed
+```
+
+**Trade-off**: Low coupling, but requires additional queries.
+
+## Pattern 2: Event-Carried State Transfer
+
+Include all data consumer might need:
+
+```
+Producer: {
+  "event": "OrderShipped",
+  "order_id": "12345",
+  "customer_id": "cust_789",
+  "shipping_address": {...},
+  "items": [...],
+  "tracking_number": "1Z999..."
+}
+```
+
+**Trade-off**: Consumer has all data, but events are larger and coupling increases.
+
+## Pattern 3: Event Sourcing (as covered above)
+
+Events are the source of truth, not notifications.
+
+## Pattern 4: Event Collaboration
+
+Multiple services collaborate by watching each other's events:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      Event Collaboration                                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Order Service ──► OrderPlaced ──┬──► Inventory Service                  │
+│                                  │    (reserves stock)                   │
+│                                  │         │                             │
+│                                  │         ▼                             │
+│                                  │    StockReserved ──► Payment Service  │
+│                                  │                       (charges card)  │
+│                                  │                            │          │
+│                                  │                            ▼          │
+│                                  └─────────────────── PaymentCompleted   │
+│                                                              │           │
+│                                                              ▼           │
+│                                                      Shipping Service    │
+│                                                       (ships order)      │
+│                                                                          │
+│  No central orchestrator—services react to each other's events           │
+│  (This is "choreography" vs "orchestration")                             │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+# Performance Characteristics
+
+## Write Performance
+
+Event sourcing is optimized for writes:
+
+| Operation | Traditional DB | Event Store |
+|-----------|---------------|-------------|
+| Write | UPDATE (random I/O) | APPEND (sequential I/O) |
+| Throughput | 10-50K writes/sec | 100K-1M writes/sec |
+| Latency | 1-10ms | 0.1-1ms |
+| Durability | fsync per txn | Batch fsync |
+
+## Read Performance
+
+Without optimization, reads are slow:
+
+| Approach | Latency | Scalability |
+|----------|---------|-------------|
+| Replay all events | O(n) events | Poor |
+| With snapshots | O(events since snapshot) | Good |
+| From projection | O(1) lookup | Excellent |
+
+## Storage Growth
+
+Events accumulate forever (by design):
+
+```
+Storage growth = events_per_day × avg_event_size × retention_period
+
+Example:
+  1M events/day × 500 bytes × 365 days = 182 GB/year
+  With 7-year retention: 1.3 TB
+
+Mitigation strategies:
+  • Compress old events
+  • Archive to cold storage
+  • Compact/aggregate old events (carefully!)
+```
+
+# Real-World Event-Driven Systems
+
+## Example: Banking System
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Banking Event Sourcing                                │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Events (immutable ledger):                                              │
+│  ──────────────────────────                                              │
+│  AccountOpened { id, holder, type, opened_at }                           │
+│  MoneyDeposited { account_id, amount, source, timestamp }                │
+│  MoneyWithdrawn { account_id, amount, destination, timestamp }           │
+│  TransferInitiated { from, to, amount, reference }                       │
+│  TransferCompleted { reference }                                         │
+│  InterestApplied { account_id, amount, period }                          │
+│  AccountFrozen { account_id, reason }                                    │
+│                                                                          │
+│  Projections:                                                            │
+│  ───────────                                                             │
+│  • Current balance (per account)                                         │
+│  • Monthly statement (per account, per month)                            │
+│  • Regulatory report (aggregated)                                        │
+│  • Fraud detection (real-time stream processing)                         │
+│                                                                          │
+│  Why event sourcing fits:                                                │
+│  ────────────────────────                                                │
+│  • Legal requirement: Complete audit trail                               │
+│  • Reconciliation: Replay to verify balances                             │
+│  • Debugging: "Why is this balance wrong?"                               │
+│  • Compliance: Reconstruct state at any past date                        │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Example: E-commerce Order System
+
+```
+Events:
+  CartCreated → ItemAdded → ItemAdded → CheckoutStarted →
+  PaymentAuthorized → OrderConfirmed → InventoryReserved →
+  OrderShipped → OrderDelivered
+
+Projections:
+  • Order status page (customer)
+  • Order management dashboard (ops)
+  • Inventory levels (warehouse)
+  • Revenue analytics (finance)
+  • Recommendation engine (ML)
+```
+
+# Trade-off Summary
+
+## Event Sourcing vs. State Persistence
+
+| Dimension | State Persistence | Event Sourcing |
+|-----------|------------------|----------------|
+| Complexity | Lower | Higher |
+| Audit trail | Manual | Automatic |
+| Schema changes | ALTER TABLE | Event upcasting |
+| Query performance | Direct | Via projections |
+| Debugging | Current state only | Full history |
+| Storage | Compact | Growing |
+| Consistency | Immediate | Eventual |
+
+## When Events Are the Right Primitive
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Event Primitive Decision Tree                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Need complete audit trail?                                              │
+│    └─ Yes → Event sourcing candidate                                     │
+│                                                                          │
+│  Multiple services need same data?                                       │
+│    └─ Yes → Event-driven integration                                     │
+│                                                                          │
+│  Write-heavy with different read patterns?                               │
+│    └─ Yes → CQRS candidate                                               │
+│                                                                          │
+│  Need to replay/reprocess historical data?                               │
+│    └─ Yes → Event log essential                                          │
+│                                                                          │
+│  Simple CRUD with no history needs?                                      │
+│    └─ Yes → State persistence is simpler                                 │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+# Conclusion
+
+Events are a fundamental primitive we've been implicitly using throughout this book:
+
+- **WAL** is an event log of database changes
+- **Kafka** is an event log for distributed systems
+- **Raft log** is an event log of state machine commands
+- **Git commits** are events in a repository's history
+
+By making events explicit, we gain:
+
+1. **Complete history**: Every change recorded
+2. **Temporal queries**: State at any point in time
+3. **Loose coupling**: Publishers don't know subscribers
+4. **Replay capability**: Rebuild state, debug issues, migrate systems
+
+The trade-off is complexity: event schemas evolve, projections must be maintained, and eventual consistency requires careful handling.
+
+In the next chapter, we'll explore **state machines**—the natural complement to events. While events describe *what happened*, state machines describe *what can happen next*.
+
+# Exercises
+
+## Conceptual Questions
+
+1. **Event vs. Command**: A user clicks "Cancel Order." Is "CancelOrder" a command or an event? What about "OrderCancelled"? Explain the difference and why it matters.
+
+2. **Event Granularity**: Should you store one event "OrderUpdated { items, address, status }" or separate events "ItemAdded", "AddressChanged", "StatusUpdated"? What are the trade-offs?
+
+3. **Projection Consistency**: Your projection is built from events with eventual consistency. A user places an order (command succeeds, event emitted) then immediately queries order status (projection not yet updated). How do you handle this?
+
+## Design Exercises
+
+4. **Event Schema Design**: Design the events for a ride-sharing application (like Uber). Include: ride request, driver matching, pickup, trip progress, dropoff, payment, rating. What fields does each event need? How do you handle cancellation at different stages?
+
+5. **Snapshot Strategy**: An account aggregate averages 50 events/year. Some accounts are 20 years old (1000 events). Design a snapshotting strategy that keeps load time under 10ms while minimizing storage overhead.
+
+6. **Event Sourcing Migration**: You have a traditional CRUD application with an "orders" table (10M rows). Design a migration strategy to event sourcing without downtime. How do you handle the transition period?
+
+## Analysis Exercises
+
+7. **Storage Calculation**: An e-commerce platform processes 100K orders/day. Each order generates ~15 events. Average event size is 500 bytes (JSON). Calculate storage requirements for 5 years. How does this change with compression (assume 4:1 ratio)?
+
+8. **Consistency Windows**: Your event-to-projection pipeline has these latencies:
+   - Event publish: 5ms
+   - Kafka to consumer: 10ms
+   - Projection update: 5ms
+
+   What's the maximum consistency window? How would you communicate this to users? Design a solution for users who need immediate read-after-write.
+
+---
+
+*Next: [State Machines for System Design](17-state-machines.qmd)*

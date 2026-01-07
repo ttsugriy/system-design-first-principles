@@ -10,13 +10,13 @@ bibliography: ../references.bib
 
 Imagine you're building a system that ingests millions of writes per second—logs from distributed services, time-series metrics, user events. Traditional B-trees struggle here: every write requires finding the right page, potentially splitting nodes, and performing random I/O to update in-place.
 
-What if instead of updating in place, you just wrote everything sequentially? Accept new data wherever you are on disk, sort it later. This is the core insight behind **Log-Structured Merge Trees** (LSM-trees).
+What if instead of updating in place, you just wrote everything sequentially? Accept new data wherever you are on disk, sort it later. This is the core insight behind **Log-Structured Merge Trees** (LSM-trees), first introduced by O'Neil et al. [@oneil1996lsm].
 
 LSM-trees power some of the most write-intensive systems in production:
 - **RocksDB** / **LevelDB** — embedded storage engines
 - **Apache Cassandra** / **ScyllaDB** — distributed databases
 - **Apache HBase** — column-family stores
-- **Google Bigtable** — the system that inspired them all
+- **Google Bigtable** [@chang2006bigtable] — the system that inspired them all
 
 Understanding LSM-trees deeply means understanding the architecture behind modern data infrastructure.
 
@@ -38,7 +38,7 @@ All writes first go to an in-memory structure called the **memtable**.
 
 **Purpose**: Absorb writes at memory speed, avoiding disk entirely for fresh data.
 
-**Implementation**: Typically a skip list or hash skip list. Why skip lists?
+**Implementation**: Typically a skip list [@pugh1990skiplist] or hash skip list. Why skip lists?
 - O(log n) reads and writes
 - Concurrent insertion without locking
 - Naturally sorted for efficient flush
@@ -419,6 +419,55 @@ Understanding LSM-trees means understanding:
 - How tuning parameters shift those trade-offs
 
 In the next article, we'll contrast this with B-trees—the read-optimized alternative—and understand when each primitive is the right choice.
+
+# Exercises
+
+## Conceptual Questions
+
+1. **Trade-off Analysis**: Explain why LSM-trees have lower write amplification than B-trees for write-heavy workloads, despite rewriting data multiple times during compaction.
+
+2. **Bloom Filter Sizing**: You're configuring bloom filters for a 500GB database with 500 million keys. Calculate the memory required for:
+   - a) 10 bits/key (1% false positive rate)
+   - b) 15 bits/key (0.1% false positive rate)
+
+   When would the extra memory for (b) be worthwhile?
+
+3. **Memtable Choice**: RocksDB offers four memtable types: SkipList, HashSkipList, HashLinkList, and Vector. A time-series database writes sequentially by timestamp and reads by time range. Which memtable type would you choose and why?
+
+## Design Exercises
+
+4. **Compaction Strategy Selection**: You're designing a storage engine for two different workloads:
+   - a) Time-series metrics: 95% writes, 5% reads, data expires after 7 days
+   - b) User profiles: 80% reads, 20% writes, data persists indefinitely
+
+   Choose compaction strategies (Leveled, Universal/Tiered, or FIFO) for each. Justify with specific trade-off analysis.
+
+5. **LSM-Tree Tuning**: Design the LSM-tree configuration for a key-value store with:
+   - 1TB total data
+   - 50K writes/sec, 100K reads/sec
+   - P99 read latency target: 10ms
+   - Available RAM: 64GB
+
+   Specify: memtable size, number of levels, level size ratio, bloom filter bits/key, and compression settings per level.
+
+6. **Read Path Optimization**: Your LSM-tree has 4 levels with 4 L0 files. In the worst case (key doesn't exist), calculate the maximum number of disk reads. How would you reduce this by 50%?
+
+## Analysis Exercises
+
+7. **Write Amplification Calculation**: For a 100GB database with:
+   - Level size ratio T = 10
+   - 4 levels (L0, L1, L2, L3)
+   - Leveled compaction
+
+   Calculate: Total write amplification. If the application writes 1GB/hour, how much data hits the disk per hour?
+
+8. **Space Amplification Comparison**: Compare space amplification for:
+   - Leveled compaction with 1TB of data
+   - Universal (Tiered) compaction with 1TB of data
+
+   Under what disk utilization threshold does Universal become impractical?
+
+9. **Recovery Time Estimation**: A crash occurs when the memtable has 64MB of data. The WAL write speed is 100MB/s sequential read. How long does recovery take? What configuration change would halve recovery time, and what's the trade-off?
 
 ---
 

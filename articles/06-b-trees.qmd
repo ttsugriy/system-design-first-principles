@@ -8,13 +8,13 @@ bibliography: ../references.bib
 
 # Introduction: The Problem B-Trees Solve
 
-If LSM-trees are optimized for writes, B-trees are optimized for reads. They're the workhorse of traditional databases—PostgreSQL, MySQL InnoDB, SQLite, Oracle, SQL Server—and have been for decades.
+If LSM-trees are optimized for writes, B-trees are optimized for reads. They're the workhorse of traditional databases—PostgreSQL, MySQL InnoDB, SQLite, Oracle, SQL Server—and have been for decades since Bayer and McCreight introduced them in 1972 [@bayer1972btree].
 
 The core insight behind B-trees:
 
 > Keep data sorted and balanced, enabling O(log N) lookups with minimal disk reads.
 
-Unlike LSM-trees, which defer organization to background compaction, B-trees maintain structure on every write. This makes reads predictable and fast, but writes more expensive.
+Unlike LSM-trees, which defer organization to background compaction, B-trees maintain structure on every write. This makes reads predictable and fast, but writes more expensive. For a comprehensive survey of B-tree variants and applications, see Comer's classic overview [@comer1979btree].
 
 # The Core Idea
 
@@ -401,6 +401,42 @@ How full to make pages during bulk load:
 **Mixed workload (OLTP)**:
 - B-tree excels: transactions touch few rows, reads dominate
 - Buffer pool absorbs repeated accesses
+
+# Exercises
+
+## Conceptual Questions
+
+1. **Fanout Optimization**: A B+tree node is 16KB. Each key is 8 bytes and each pointer is 8 bytes. What is the maximum fanout (number of children) for an internal node? How does this change if keys are 64-byte strings?
+
+2. **Tree Depth**: You have 1 billion (10^9) records. With a fanout of 400, what is the maximum depth of the B+tree? How many disk reads are needed for a single point query (assuming no buffer pool)?
+
+3. **B-tree vs LSM Choice**: You're designing a logging system that writes 100,000 events/second but only reads for occasional audits (once per week). Would you choose B-tree or LSM-tree storage? Justify your answer with trade-off analysis.
+
+## Analysis Exercises
+
+4. **Page Split Cost**: A B+tree has 1 million leaf pages. The average leaf is 70% full. If you insert 100,000 new random keys:
+   - Approximately how many page splits will occur?
+   - What is the total I/O cost of these splits (in pages read + written)?
+
+5. **Buffer Pool Sizing**: Your database has a 100GB B+tree index. Working set analysis shows 80% of queries hit 5% of the data (hot set).
+   - What is the minimum buffer pool size to keep the hot set in memory?
+   - If you double the buffer pool, what's the expected improvement in hit rate?
+
+6. **Index Selection**: A table has columns (user_id, timestamp, event_type, payload). Queries are:
+   - 60%: `WHERE user_id = ?` (point lookup)
+   - 30%: `WHERE user_id = ? AND timestamp > ? AND timestamp < ?` (range)
+   - 10%: `WHERE event_type = ? ORDER BY timestamp LIMIT 100`
+
+   Design the optimal B+tree index(es). Consider: composite keys, covering indexes, and the trade-off of multiple indexes.
+
+## Design Exercises
+
+7. **Concurrent B-tree**: Design a latch coupling protocol for a B+tree that supports concurrent readers and writers. Specify:
+   - When to acquire and release latches during tree descent
+   - How to handle page splits during concurrent operations
+   - The maximum number of latches held at any time
+
+8. **Write Amplification Reduction**: A write-heavy workload is causing excessive page splits. Design a strategy to reduce write amplification while maintaining read performance. Consider: leaf page compaction, out-of-place updates, or hybrid approaches.
 
 # Conclusion: The Enduring Classic
 

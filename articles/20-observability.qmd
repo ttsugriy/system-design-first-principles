@@ -1,0 +1,646 @@
+---
+title: "Observability"
+subtitle: "Understanding What Your System Is Doing"
+author: "Taras Tsugrii"
+date: today
+bibliography: ../references.bib
+---
+
+# The Observability Problem
+
+You've deployed a complex distributed system. Thousands of requests per second flow through dozens of services. Then something goes wrong:
+
+- Latency spikes for 5% of users
+- A service is returning errors intermittently
+- CPU usage is high but you don't know why
+- Users report "slowness" but your dashboards look fine
+
+How do you understand what's happening inside your system? This is the **observability problem**.
+
+**Observability** is the ability to understand a system's internal state by examining its external outputs. A system is observable if you can answer questions about its behavior without deploying new code or adding new instrumentation.
+
+# The Three Pillars
+
+Modern observability is built on three complementary data types:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     The Three Pillars of Observability                   │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐       │
+│  │      LOGS        │  │     METRICS      │  │     TRACES       │       │
+│  │                  │  │                  │  │                  │       │
+│  │  Discrete events │  │  Numeric time    │  │  Request flow    │       │
+│  │  with context    │  │  series data     │  │  across services │       │
+│  │                  │  │                  │  │                  │       │
+│  │  "What happened" │  │  "What's the     │  │  "How did this   │       │
+│  │                  │  │   trend?"        │  │   request flow?" │       │
+│  │                  │  │                  │  │                  │       │
+│  │  Examples:       │  │  Examples:       │  │  Examples:       │       │
+│  │  - Error logs    │  │  - Request rate  │  │  - Span timings  │       │
+│  │  - Audit events  │  │  - CPU usage     │  │  - Service calls │       │
+│  │  - Debug info    │  │  - Queue depth   │  │  - Bottlenecks   │       │
+│  │                  │  │  - P99 latency   │  │                  │       │
+│  └──────────────────┘  └──────────────────┘  └──────────────────┘       │
+│                                                                          │
+│  High cardinality    Low cardinality      High cardinality              │
+│  High volume         Low volume           Medium volume                  │
+│  Expensive to query  Cheap to query       Medium cost                    │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+Each pillar answers different questions and has different trade-offs.
+
+# Logs: The Record of Events
+
+Logs are timestamped records of discrete events.
+
+## Log Levels
+
+| Level | Purpose | Production Use |
+|-------|---------|----------------|
+| ERROR | System errors requiring attention | Always log |
+| WARN | Potential issues, degraded state | Always log |
+| INFO | Significant events (start/stop, config) | Usually log |
+| DEBUG | Detailed debugging information | Conditional |
+| TRACE | Very detailed tracing | Rarely in production |
+
+## Structured Logging
+
+**Unstructured** (hard to query):
+```
+2024-01-15 10:23:45 ERROR: Failed to process order 12345 for user abc123
+```
+
+**Structured** (easy to query):
+```json
+{
+  "timestamp": "2024-01-15T10:23:45Z",
+  "level": "ERROR",
+  "message": "Failed to process order",
+  "order_id": "12345",
+  "user_id": "abc123",
+  "error_code": "PAYMENT_DECLINED",
+  "service": "order-processor",
+  "trace_id": "abc123def456"
+}
+```
+
+Structured logs enable:
+- Filter by any field (`order_id=12345`)
+- Aggregate by field (`COUNT(*) GROUP BY error_code`)
+- Correlate across services (`trace_id=abc123def456`)
+
+## Log Aggregation Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Log Aggregation Pipeline                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Service A ─┬─► Local Agent ─┐                                           │
+│  Service B ─┤   (Fluentd,    ├─► Message Queue ─► Log Processor          │
+│  Service C ─┤    Vector)     │   (Kafka)          (parsing, enrichment)  │
+│  Service D ─┘                │                          │                │
+│                              │                          ▼                │
+│                              │                    Log Storage            │
+│                              │               (Elasticsearch, Loki)       │
+│                              │                          │                │
+│                              │                          ▼                │
+│                              │                    Query/Dashboard        │
+│                              │                 (Kibana, Grafana)         │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Log Retention Trade-offs
+
+| Retention | Storage Cost | Query Speed | Use Case |
+|-----------|-------------|-------------|----------|
+| 7 days | Low | Fast | Real-time debugging |
+| 30 days | Medium | Medium | Incident investigation |
+| 1 year | High | Slow (cold storage) | Compliance, auditing |
+
+## Sampling for High-Volume Logs
+
+At scale (millions of requests/second), logging everything is expensive. Sampling strategies:
+
+- **Head-based**: Log 10% of requests randomly
+- **Tail-based**: Log all errors, sample successes
+- **Dynamic**: Increase sampling when issues detected
+
+# Metrics: The Numeric Heartbeat
+
+Metrics are numeric values measured over time.
+
+## Metric Types
+
+### Counter
+
+A cumulative value that only increases (or resets to zero).
+
+```
+http_requests_total{method="GET", path="/api/users"} 12847293
+```
+
+**Use for**: Request counts, error counts, bytes transferred
+
+### Gauge
+
+A value that can go up or down.
+
+```
+active_connections{server="web-1"} 127
+cpu_usage_percent{server="web-1"} 73.5
+queue_depth{queue="orders"} 1523
+```
+
+**Use for**: Current values, resource usage, queue depths
+
+### Histogram
+
+Distribution of values in configurable buckets.
+
+```
+http_request_duration_seconds_bucket{le="0.01"} 4523
+http_request_duration_seconds_bucket{le="0.05"} 12847
+http_request_duration_seconds_bucket{le="0.1"}  18293
+http_request_duration_seconds_bucket{le="0.5"}  19842
+http_request_duration_seconds_bucket{le="1.0"}  19956
+http_request_duration_seconds_bucket{le="+Inf"} 20000
+```
+
+**Use for**: Latency distributions, request sizes
+
+### Summary
+
+Similar to histogram but calculates quantiles client-side.
+
+```
+http_request_duration_seconds{quantile="0.5"}  0.042
+http_request_duration_seconds{quantile="0.9"}  0.087
+http_request_duration_seconds{quantile="0.99"} 0.284
+```
+
+## The Four Golden Signals
+
+Google's SRE book recommends monitoring these four signals for any service:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                       The Four Golden Signals                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  1. LATENCY                                                              │
+│     Time to serve a request                                              │
+│     ────────────────────────                                             │
+│     Key insight: Distinguish successful vs failed request latency.      │
+│     A fast error is still a failure.                                     │
+│                                                                          │
+│     Metrics:                                                             │
+│       - http_request_duration_seconds (histogram)                        │
+│       - p50, p90, p99 percentiles                                        │
+│                                                                          │
+│  2. TRAFFIC                                                              │
+│     Demand on the system                                                 │
+│     ───────────────────────                                              │
+│     How much work is the system doing?                                   │
+│                                                                          │
+│     Metrics:                                                             │
+│       - http_requests_per_second                                         │
+│       - queries_per_second                                               │
+│       - transactions_per_minute                                          │
+│                                                                          │
+│  3. ERRORS                                                               │
+│     Rate of failed requests                                              │
+│     ───────────────────────                                              │
+│     Include explicit errors (500s) and implicit (wrong content).        │
+│                                                                          │
+│     Metrics:                                                             │
+│       - http_errors_total / http_requests_total                          │
+│       - error_rate_percent                                               │
+│                                                                          │
+│  4. SATURATION                                                           │
+│     How "full" the system is                                             │
+│     ─────────────────────────                                            │
+│     Resources approaching limits degrade before failing.                 │
+│                                                                          │
+│     Metrics:                                                             │
+│       - cpu_usage_percent                                                │
+│       - memory_usage_percent                                             │
+│       - disk_io_utilization                                              │
+│       - thread_pool_active / thread_pool_max                             │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## RED Method (Request-focused)
+
+For request-driven services:
+
+- **R**ate: Requests per second
+- **E**rrors: Failed requests per second
+- **D**uration: Distribution of request latency
+
+## USE Method (Resource-focused)
+
+For resources (CPU, memory, disk, network):
+
+- **U**tilization: Percentage of time resource is busy
+- **S**aturation: Queue depth (work waiting)
+- **E**rrors: Error events
+
+## Cardinality: The Hidden Cost
+
+Each unique combination of labels creates a time series:
+
+```
+http_requests_total{method="GET", path="/users", status="200"}
+http_requests_total{method="GET", path="/users", status="500"}
+http_requests_total{method="POST", path="/orders", status="200"}
+...
+```
+
+**High cardinality explosion**:
+```
+Labels: user_id (1M users) × endpoint (100) × status (10)
+Time series: 1,000,000 × 100 × 10 = 1 billion time series
+```
+
+**Mitigation**:
+- Don't use high-cardinality values as labels (user_id, request_id)
+- Use logs for high-cardinality data
+- Aggregate at the edge before sending to metrics backend
+
+# Traces: Following the Request
+
+Traces show how a single request flows through a distributed system.
+
+## Anatomy of a Trace
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Distributed Trace Example                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Trace ID: abc123def456                                                  │
+│                                                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐    │
+│  │ Span: API Gateway (root)                                        │    │
+│  │ Duration: 245ms                                                  │    │
+│  │ ├──────────────────────────────────────────────────────────────┤│    │
+│  │ │                                                              ││    │
+│  │ │  ┌────────────────────────────────────────────────────────┐  ││    │
+│  │ │  │ Span: Auth Service                                     │  ││    │
+│  │ │  │ Duration: 15ms                                         │  ││    │
+│  │ │  └────────────────────────────────────────────────────────┘  ││    │
+│  │ │                                                              ││    │
+│  │ │  ┌─────────────────────────────────────────────────────────┐ ││    │
+│  │ │  │ Span: Order Service                                     │ ││    │
+│  │ │  │ Duration: 180ms                                         │ ││    │
+│  │ │  │ ├─────────────────────────────────────────────────────┤ │ ││    │
+│  │ │  │ │                                                     │ │ ││    │
+│  │ │  │ │  ┌──────────────────────────────────────────────┐   │ │ ││    │
+│  │ │  │ │  │ Span: Database Query                         │   │ │ ││    │
+│  │ │  │ │  │ Duration: 45ms                               │   │ │ ││    │
+│  │ │  │ │  │ query: "SELECT * FROM orders WHERE..."       │   │ │ ││    │
+│  │ │  │ │  └──────────────────────────────────────────────┘   │ │ ││    │
+│  │ │  │ │                                                     │ │ ││    │
+│  │ │  │ │  ┌──────────────────────────────────────────────┐   │ │ ││    │
+│  │ │  │ │  │ Span: Payment Service                        │   │ │ ││    │
+│  │ │  │ │  │ Duration: 120ms  ← BOTTLENECK!               │   │ │ ││    │
+│  │ │  │ │  │ status: "slow_response"                      │   │ │ ││    │
+│  │ │  │ │  └──────────────────────────────────────────────┘   │ │ ││    │
+│  │ │  │ │                                                     │ │ ││    │
+│  │ │  │ └─────────────────────────────────────────────────────┘ │ ││    │
+│  │ │  └─────────────────────────────────────────────────────────┘ ││    │
+│  │ │                                                              ││    │
+│  │ │  ┌────────────────────────────────────────────────────────┐  ││    │
+│  │ │  │ Span: Response Serialization                           │  ││    │
+│  │ │  │ Duration: 5ms                                          │  ││    │
+│  │ │  └────────────────────────────────────────────────────────┘  ││    │
+│  │ │                                                              ││    │
+│  │ └──────────────────────────────────────────────────────────────┘│    │
+│  └─────────────────────────────────────────────────────────────────┘    │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Trace Propagation
+
+Context must be passed between services:
+
+```
+Service A                              Service B
+    │                                      │
+    │  HTTP Request                        │
+    │  Headers:                            │
+    │    X-Trace-Id: abc123def456          │
+    │    X-Span-Id: span-001               │
+    │    X-Parent-Span-Id: (none)          │
+    │─────────────────────────────────────►│
+    │                                      │
+    │                                      │ Creates child span:
+    │                                      │   trace_id: abc123def456
+    │                                      │   span_id: span-002
+    │                                      │   parent_span_id: span-001
+    │                                      │
+```
+
+## Sampling Strategies
+
+Tracing generates significant data. Sampling is essential.
+
+### Head-Based Sampling
+
+Decide at request start whether to trace:
+
+```
+if random() < 0.01:  # 1% sampling
+    trace = True
+```
+
+**Problem**: May miss rare, interesting events.
+
+### Tail-Based Sampling
+
+Collect all spans, decide later what to keep:
+
+- Keep all traces with errors
+- Keep all traces slower than P99
+- Sample normal traces at 1%
+
+**Trade-off**: Requires buffering all data temporarily.
+
+## Trace Storage Costs
+
+| Sampling Rate | Spans/Day (10K RPS) | Storage/Day |
+|---------------|---------------------|-------------|
+| 100% | 864M spans | ~100 GB |
+| 10% | 86M spans | ~10 GB |
+| 1% | 8.6M spans | ~1 GB |
+| 0.1% | 860K spans | ~100 MB |
+
+# SLIs, SLOs, and SLAs
+
+## Service Level Indicators (SLIs)
+
+Quantitative measures of service behavior:
+
+| SLI | Measurement | Good Threshold |
+|-----|-------------|----------------|
+| Availability | Successful requests / total requests | > 99.9% |
+| Latency | Request duration at percentile | P99 < 200ms |
+| Throughput | Requests processed per second | > 1000 RPS |
+| Error rate | Failed requests / total requests | < 0.1% |
+
+## Service Level Objectives (SLOs)
+
+Target values for SLIs over a time window:
+
+```
+"99.9% of requests will complete successfully within 200ms, measured over a rolling 30-day window."
+```
+
+### Error Budgets
+
+An SLO of 99.9% availability means you can afford 0.1% downtime:
+
+```
+30 days × 24 hours × 60 minutes = 43,200 minutes
+0.1% error budget = 43.2 minutes of downtime per month
+```
+
+Error budget status guides decisions:
+- Budget remaining → Ship features, take risks
+- Budget exhausted → Focus on reliability, slow down releases
+
+## Service Level Agreements (SLAs)
+
+Contractual commitments with consequences:
+
+```
+"If monthly availability falls below 99.9%, customer receives 10% service credit."
+```
+
+**SLA ≠ SLO**: Set SLOs tighter than SLAs to have buffer.
+
+# Alerting
+
+## Alert Quality Principles
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      Good Alerts vs Bad Alerts                           │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  GOOD ALERTS                          BAD ALERTS                         │
+│  ───────────                          ──────────                         │
+│                                                                          │
+│  ✓ Actionable                         ✗ Informational only               │
+│    "Database disk 90% full"             "Disk usage changed"             │
+│                                                                          │
+│  ✓ Based on symptoms                  ✗ Based on causes                  │
+│    "Error rate > 1%"                    "Server CPU > 80%"               │
+│                                                                          │
+│  ✓ Include context                    ✗ Require investigation            │
+│    Link to runbook, recent changes      "Something is wrong"             │
+│                                                                          │
+│  ✓ Appropriate urgency                ✗ All high priority                │
+│    Page for P99 > 1s                    Page for everything              │
+│    Ticket for P99 > 500ms                                                │
+│                                                                          │
+│  ✓ Tuned thresholds                   ✗ Default thresholds               │
+│    Based on actual SLOs                 "CPU > 80%" (arbitrary)          │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Alert Fatigue
+
+Too many alerts leads to:
+- Engineers ignoring alerts
+- Slow response to real incidents
+- Burnout and turnover
+
+**Mitigation**:
+- Review and delete noisy alerts monthly
+- Require runbook for every alert
+- Track alert-to-action ratio
+
+## Multi-Window Alerting
+
+Simple threshold alerts are noisy. Use multiple time windows:
+
+```
+Alert if:
+  error_rate > 1% for 5 minutes (short window, high threshold)
+  OR
+  error_rate > 0.5% for 30 minutes (long window, lower threshold)
+```
+
+This catches both sudden spikes and gradual degradation.
+
+# Debugging with Observability
+
+## The Debugging Workflow
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                       Debugging Workflow                                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  1. DETECT (Metrics + Alerts)                                            │
+│     "Error rate increased to 5% at 14:23"                                │
+│                                                                          │
+│  2. TRIAGE (Metrics)                                                     │
+│     "Which service? Which endpoint? Which users?"                        │
+│     Dashboard shows: Order Service, /checkout endpoint                   │
+│                                                                          │
+│  3. CORRELATE (Traces)                                                   │
+│     "Show me failed requests to /checkout"                               │
+│     Trace shows: Payment Service timing out                              │
+│                                                                          │
+│  4. INVESTIGATE (Logs)                                                   │
+│     "Show me Payment Service logs during this time"                      │
+│     Logs show: "Connection pool exhausted"                               │
+│                                                                          │
+│  5. ROOT CAUSE (All pillars)                                             │
+│     "Why is connection pool exhausted?"                                  │
+│     Metrics show: Database latency spiked                                │
+│     Logs show: Long-running query from batch job                         │
+│                                                                          │
+│  6. REMEDIATE                                                            │
+│     Kill batch job, latency recovers, errors stop                        │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Correlation is Key
+
+Link data across pillars:
+
+```json
+// Log entry
+{
+  "trace_id": "abc123",
+  "message": "Payment failed",
+  "error": "timeout"
+}
+
+// Metric
+payment_errors_total{trace_id="abc123", error="timeout"} 1
+
+// Trace span
+{
+  "trace_id": "abc123",
+  "span_id": "span-003",
+  "service": "payment",
+  "error": true
+}
+```
+
+Same `trace_id` across all three → click from metric to trace to log.
+
+# Observability Infrastructure
+
+## Architecture Patterns
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                   Observability Infrastructure                           │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Applications                                                            │
+│  ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐                                        │
+│  │Svc A│ │Svc B│ │Svc C│ │Svc D│                                        │
+│  └──┬──┘ └──┬──┘ └──┬──┘ └──┬──┘                                        │
+│     │       │       │       │                                            │
+│     └───────┼───────┼───────┘                                            │
+│             │       │                                                    │
+│             ▼       ▼                                                    │
+│  ┌────────────────────────────────────────────────────────────────┐     │
+│  │                    OpenTelemetry Collector                      │     │
+│  │  (receives, processes, exports telemetry data)                  │     │
+│  └────────────────────────────────────────────────────────────────┘     │
+│             │               │                   │                        │
+│             ▼               ▼                   ▼                        │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                   │
+│  │    Metrics   │  │     Logs     │  │    Traces    │                   │
+│  │  (Prometheus │  │ (Elasticsearch│  │   (Jaeger,   │                   │
+│  │   Mimir)     │  │  Loki)       │  │   Tempo)     │                   │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘                   │
+│         │                 │                 │                            │
+│         └─────────────────┼─────────────────┘                            │
+│                           ▼                                              │
+│                   ┌──────────────┐                                       │
+│                   │   Grafana    │                                       │
+│                   │ (Dashboards, │                                       │
+│                   │   Alerts)    │                                       │
+│                   └──────────────┘                                       │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Cost Considerations
+
+| Component | Cost Driver | Optimization |
+|-----------|------------|--------------|
+| Metrics | Cardinality × retention | Reduce labels, shorter retention |
+| Logs | Volume × retention | Sampling, compression, tiered storage |
+| Traces | Spans × retention | Aggressive sampling |
+| Storage | Total data volume | Cold storage for old data |
+| Queries | Query complexity × frequency | Pre-aggregation, caching |
+
+# Exercises
+
+## Conceptual Questions
+
+1. **Pillar Selection**: For each scenario, which observability pillar (logs, metrics, traces) would you use first?
+   - "Average latency increased by 50ms"
+   - "One specific user reports slow performance"
+   - "What query caused the database lock?"
+   - "How many errors occurred last hour?"
+
+2. **SLO Design**: Your API has these requirements:
+   - 99.9% of requests should succeed
+   - P99 latency should be under 200ms
+   - No more than 0.1% of requests should timeout
+
+   Define SLIs for each requirement. What metrics would you collect?
+
+3. **Cardinality Trade-offs**: You want to track latency by user_id (1M users). Explain why this is problematic for metrics. Propose an alternative approach using logs or traces.
+
+## Analysis Exercises
+
+4. **Error Budget**: Your service has an SLO of 99.9% availability. In the past 30 days:
+   - Days 1-20: 99.95% availability
+   - Days 21-25: 99.8% availability (incident)
+   - Days 26-30: 99.99% availability
+
+   Calculate the error budget consumed. How much remains?
+
+5. **Sampling Decision**: Your service handles 10,000 RPS. Each trace has 5 spans averaging 500 bytes each. Storage costs $0.023/GB/month.
+   - Calculate monthly storage cost at 100%, 10%, 1% sampling
+   - At what sampling rate does cost exceed $100/month?
+
+## Design Exercises
+
+6. **Observability Stack**: Design an observability strategy for a microservices application with:
+   - 20 services
+   - 50,000 requests per second
+   - Budget: $5,000/month for observability infrastructure
+
+   Specify: What to collect, sampling rates, retention periods, tooling choices.
+
+7. **Alert Design**: Design an alerting strategy for an e-commerce checkout service. Define:
+   - 3 symptom-based alerts (user-facing impact)
+   - Thresholds and time windows
+   - Escalation policy (who gets paged when)
+   - Runbook outline for each alert
+
+---
+
+*Part VI: Operational Patterns — Complete*

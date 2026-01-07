@@ -160,6 +160,42 @@ We'll draw on the research of Stratos Idreos and colleagues at Harvard, who have
 
 But it all starts with accepting the fundamental premise: there is no best. There are only trade-offs. And that's what makes system design interesting.
 
+# Exercises
+
+## Conceptual Questions
+
+1. **RUM Conjecture Application**: A search engine needs to index 100 billion web pages. For each of these use cases, identify which two RUM dimensions you'd optimize and which one you'd sacrifice:
+   - a) Real-time search (sub-100ms query latency)
+   - b) Cost-optimized archival search (queries can take seconds)
+   - c) Frequently updated news index (pages change hourly)
+
+2. **Best Practices Critique**: The advice "always add an index for frequently queried columns" is a common best practice. Describe a scenario where following this advice would hurt performance. What assumptions does this advice make?
+
+3. **CAP Theorem Application**: For each system, explain whether you'd prioritize consistency or availability during a network partition:
+   - a) Banking transaction system
+   - b) Social media "like" counter
+   - c) Distributed lock service
+   - d) Shopping cart service
+
+## Analysis Exercises
+
+4. **Design Space Calculation**: A storage system has these tunable parameters:
+   - Compression algorithm: 4 options
+   - Index type: 3 options
+   - Replication factor: 3 options (1, 2, 3)
+   - Consistency level: 4 options
+   - Cache size: Continuous (but let's say 10 practical options)
+
+   How many distinct configurations are possible? If evaluating each takes 1 hour, how long would exhaustive search take?
+
+5. **Trade-off Quantification**: A B-tree index provides 2ms read latency but 50ms write latency (due to random I/O). An LSM-tree provides 10ms read latency but 5ms write latency. For a workload with X% reads and (100-X)% writes, at what value of X are the two indexes equivalent in average latency?
+
+6. **PACELC Analysis**: Your distributed database can be configured for:
+   - Sync replication (10ms added latency, strong consistency)
+   - Async replication (no added latency, eventual consistency with 100ms staleness window)
+
+   An e-commerce application has product listings (read 1000×/sec, updated 1×/hour) and inventory counts (read 100×/sec, updated 100×/sec). Which replication mode would you use for each? Calculate the impact on average latency for the product listing use case.
+
 ---
 
 *Next: [Primitives — The Atoms of System Design](02-primitives.qmd)*

@@ -29,3 +29,333 @@
   year={2017},
   publisher={O'Reilly Media}
 }
+
+% === LSM-Trees and Storage Engines ===
+
+@article{oneil1996lsm,
+  title={The Log-Structured Merge-Tree (LSM-Tree)},
+  author={O'Neil, Patrick and Cheng, Edward and Gawlick, Dieter and O'Neil, Elizabeth},
+  journal={Acta Informatica},
+  volume={33},
+  number={4},
+  pages={351--385},
+  year={1996},
+  publisher={Springer}
+}
+
+@inproceedings{chang2006bigtable,
+  title={Bigtable: A Distributed Storage System for Structured Data},
+  author={Chang, Fay and Dean, Jeffrey and Ghemawat, Sanjay and Hsieh, Wilson C and Wallach, Deborah A and Burrows, Mike and Chandra, Tushar and Fikes, Andrew and Gruber, Robert E},
+  booktitle={OSDI},
+  pages={205--218},
+  year={2006}
+}
+
+% === Consensus and Distributed Systems ===
+
+@inproceedings{ongaro2014raft,
+  title={In Search of an Understandable Consensus Algorithm},
+  author={Ongaro, Diego and Ousterhout, John},
+  booktitle={USENIX Annual Technical Conference},
+  pages={305--319},
+  year={2014}
+}
+
+@article{lamport1998paxos,
+  title={The Part-Time Parliament},
+  author={Lamport, Leslie},
+  journal={ACM Transactions on Computer Systems},
+  volume={16},
+  number={2},
+  pages={133--169},
+  year={1998}
+}
+
+@article{lamport2001paxos,
+  title={Paxos Made Simple},
+  author={Lamport, Leslie},
+  journal={ACM SIGACT News},
+  volume={32},
+  number={4},
+  pages={51--58},
+  year={2001}
+}
+
+@article{fischer1985flp,
+  title={Impossibility of Distributed Consensus with One Faulty Process},
+  author={Fischer, Michael J and Lynch, Nancy A and Paterson, Michael S},
+  journal={Journal of the ACM},
+  volume={32},
+  number={2},
+  pages={374--382},
+  year={1985}
+}
+
+% === CAP Theorem and Distributed Theory ===
+
+@article{gilbert2002brewer,
+  title={Brewer's Conjecture and the Feasibility of Consistent, Available, Partition-Tolerant Web Services},
+  author={Gilbert, Seth and Lynch, Nancy},
+  journal={ACM SIGACT News},
+  volume={33},
+  number={2},
+  pages={51--59},
+  year={2002}
+}
+
+@article{brewer2012cap,
+  title={CAP Twelve Years Later: How the "Rules" Have Changed},
+  author={Brewer, Eric},
+  journal={Computer},
+  volume={45},
+  number={2},
+  pages={23--29},
+  year={2012},
+  publisher={IEEE}
+}
+
+@inproceedings{abadi2012pacelc,
+  title={Consistency Tradeoffs in Modern Distributed Database System Design: CAP is Only Part of the Story},
+  author={Abadi, Daniel},
+  booktitle={Computer},
+  volume={45},
+  number={2},
+  pages={37--42},
+  year={2012}
+}
+
+% === Transactions and Concurrency Control ===
+
+@article{bernstein1983mvcc,
+  title={Multiversion Concurrency Control—Theory and Algorithms},
+  author={Bernstein, Philip A and Goodman, Nathan},
+  journal={ACM Transactions on Database Systems},
+  volume={8},
+  number={4},
+  pages={465--483},
+  year={1983}
+}
+
+@inproceedings{ports2012ssi,
+  title={Serializable Snapshot Isolation in PostgreSQL},
+  author={Ports, Dan RK and Grittner, Kevin},
+  booktitle={Proceedings of the VLDB Endowment},
+  volume={5},
+  number={12},
+  pages={1850--1861},
+  year={2012}
+}
+
+@inproceedings{cahill2008ssi,
+  title={Serializable Isolation for Snapshot Databases},
+  author={Cahill, Michael J and R{\"o}hm, Uwe and Fekete, Alan D},
+  booktitle={ACM SIGMOD},
+  pages={729--738},
+  year={2008}
+}
+
+@inproceedings{gray1976granularity,
+  title={Granularity of Locks and Degrees of Consistency in a Shared Data Base},
+  author={Gray, Jim N and Lorie, Raymond A and Putzolu, Gianfranco R and Traiger, Irving L},
+  booktitle={IFIP Working Conference on Modelling in Data Base Management Systems},
+  pages={365--394},
+  year={1976}
+}
+
+% === Distributed Databases ===
+
+@article{corbett2013spanner,
+  title={Spanner: Google's Globally Distributed Database},
+  author={Corbett, James C and Dean, Jeffrey and Epstein, Michael and Fikes, Andrew and Frost, Christopher and Furman, JJ and Ghemawat, Sanjay and Gubarev, Andrey and Heiser, Christopher and Hochschild, Peter and others},
+  journal={ACM Transactions on Computer Systems},
+  volume={31},
+  number={3},
+  pages={1--22},
+  year={2013}
+}
+
+@inproceedings{taft2020cockroachdb,
+  title={CockroachDB: The Resilient Geo-Distributed SQL Database},
+  author={Taft, Rebecca and Sharber, Irfan and Matber, Frank and Vaidyanathan, Ramu and others},
+  booktitle={SIGMOD},
+  pages={1493--1509},
+  year={2020}
+}
+
+@inproceedings{decandia2007dynamo,
+  title={Dynamo: Amazon's Highly Available Key-Value Store},
+  author={DeCandia, Giuseppe and Hastorun, Deniz and Jampani, Madan and Kakulapati, Gunavardhan and Lakshman, Avinash and Pilchin, Alex and Sivasubramanian, Swaminathan and Vosshall, Peter and Vogels, Werner},
+  booktitle={SOSP},
+  pages={205--220},
+  year={2007}
+}
+
+% === Bloom Filters and Probabilistic Data Structures ===
+
+@article{bloom1970filter,
+  title={Space/Time Trade-offs in Hash Coding with Allowable Errors},
+  author={Bloom, Burton H},
+  journal={Communications of the ACM},
+  volume={13},
+  number={7},
+  pages={422--426},
+  year={1970}
+}
+
+% === Learned Index Structures and AI for Databases ===
+
+@inproceedings{kraska2018learned,
+  title={The Case for Learned Index Structures},
+  author={Kraska, Tim and Beutel, Alex and Chi, Ed H and Dean, Jeffrey and Polyzotis, Neoklis},
+  booktitle={SIGMOD},
+  pages={489--504},
+  year={2018}
+}
+
+@inproceedings{marcus2019bao,
+  title={Bao: Making Learned Query Optimization Practical},
+  author={Marcus, Ryan and Negi, Parimarjan and Mao, Hongzi and Tatbul, Nesime and Alizadeh, Mohammad and Kraska, Tim},
+  booktitle={SIGMOD},
+  pages={1275--1292},
+  year={2021}
+}
+
+@inproceedings{pavlo2017self,
+  title={Self-Driving Database Management Systems},
+  author={Pavlo, Andrew and Angulo, Gustavo and Arulraj, Joy and Lin, Haibin and Lin, Jiexi and Ma, Lin and Menon, Prashanth and Mowry, Todd C and Perron, Matthew and Quah, Ian and others},
+  booktitle={CIDR},
+  year={2017}
+}
+
+@inproceedings{aken2017ottertune,
+  title={Automatic Database Management System Tuning Through Large-scale Machine Learning},
+  author={Van Aken, Dana and Pavlo, Andrew and Gordon, Geoffrey J and Zhang, Bohan},
+  booktitle={SIGMOD},
+  pages={1009--1024},
+  year={2017}
+}
+
+% === Message Queues and Streaming ===
+
+@inproceedings{kreps2011kafka,
+  title={Kafka: A Distributed Messaging System for Log Processing},
+  author={Kreps, Jay and Narkhede, Neha and Rao, Jun},
+  booktitle={NetDB Workshop},
+  year={2011}
+}
+
+% === B-Trees ===
+
+@article{bayer1972btree,
+  title={Organization and Maintenance of Large Ordered Indexes},
+  author={Bayer, Rudolf and McCreight, Edward M},
+  journal={Acta Informatica},
+  volume={1},
+  number={3},
+  pages={173--189},
+  year={1972}
+}
+
+@article{comer1979btree,
+  title={The Ubiquitous B-Tree},
+  author={Comer, Douglas},
+  journal={ACM Computing Surveys},
+  volume={11},
+  number={2},
+  pages={121--137},
+  year={1979}
+}
+
+% === Time-Series and Specialized Databases ===
+
+@inproceedings{pelkonen2015gorilla,
+  title={Gorilla: A Fast, Scalable, In-Memory Time Series Database},
+  author={Pelkonen, Tuomas and Franklin, Scott and Teller, Justin and Cavallaro, Paul and Huang, Qi and Meza, Justin and Veeraraghavan, Kaushik},
+  booktitle={VLDB},
+  volume={8},
+  number={12},
+  pages={1816--1827},
+  year={2015}
+}
+
+% === Time, Clocks, and Ordering ===
+
+@article{lamport1978time,
+  title={Time, Clocks, and the Ordering of Events in a Distributed System},
+  author={Lamport, Leslie},
+  journal={Communications of the ACM},
+  volume={21},
+  number={7},
+  pages={558--565},
+  year={1978}
+}
+
+@inproceedings{fidge1988timestamps,
+  title={Timestamps in Message-Passing Systems That Preserve the Partial Ordering},
+  author={Fidge, Colin J},
+  booktitle={Proceedings of the 11th Australian Computer Science Conference},
+  pages={56--66},
+  year={1988}
+}
+
+@article{mattern1989vector,
+  title={Virtual Time and Global States of Distributed Systems},
+  author={Mattern, Friedemann},
+  journal={Parallel and Distributed Algorithms},
+  volume={1},
+  number={23},
+  pages={215--226},
+  year={1989}
+}
+
+% === Event Sourcing and CQRS ===
+
+@misc{fowler2005eventsourcing,
+  title={Event Sourcing},
+  author={Fowler, Martin},
+  year={2005},
+  howpublished={\url{https://martinfowler.com/eaaDev/EventSourcing.html}},
+  note={Accessed: 2024}
+}
+
+@misc{young2010cqrs,
+  title={CQRS Documents},
+  author={Young, Greg},
+  year={2010},
+  howpublished={\url{https://cqrs.files.wordpress.com/2010/11/cqrs_documents.pdf}},
+  note={Accessed: 2024}
+}
+
+% === Resilience Patterns ===
+
+@book{nygard2018release,
+  title={Release It!: Design and Deploy Production-Ready Software},
+  author={Nygard, Michael T},
+  year={2018},
+  publisher={Pragmatic Bookshelf},
+  edition={2nd}
+}
+
+% === Tail Latency ===
+
+@article{dean2013tail,
+  title={The Tail at Scale},
+  author={Dean, Jeffrey and Barroso, Luiz Andr{\'e}},
+  journal={Communications of the ACM},
+  volume={56},
+  number={2},
+  pages={74--80},
+  year={2013}
+}
+
+% === Skip Lists ===
+
+@article{pugh1990skiplist,
+  title={Skip Lists: A Probabilistic Alternative to Balanced Trees},
+  author={Pugh, William},
+  journal={Communications of the ACM},
+  volume={33},
+  number={6},
+  pages={668--676},
+  year={1990}
+}

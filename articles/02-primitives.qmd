@@ -332,6 +332,32 @@ When designing a system, ask:
 
 This is the primitive mindset: decompose, understand, compose.
 
+# Deep-Dive References
+
+Each primitive introduced here is explored in depth in Part II:
+
+| Primitive | Deep-Dive Chapter |
+|-----------|-------------------|
+| LSM-trees, Memtables, SSTables, Compaction | [Chapter 5: LSM-Trees](05-lsm-trees.qmd) |
+| B-trees, B+trees, Buffer Pool | [Chapter 6: B-Trees](06-b-trees.qmd) |
+| Consensus, Raft, Paxos | [Chapter 7: Consensus Protocols](07-consensus.qmd) |
+| Transactions, MVCC, Isolation | [Chapter 8: Transactions](08-transactions.qmd) |
+| Caching, Eviction Policies | [Chapter 9: Caching Strategies](09-caching.qmd) |
+
+Part III shows how these primitives compose into real systems:
+
+- [Chapter 11: Key-Value Store](11-case-kv-store.qmd) — LSM-tree + WAL + Replication + Consistent Hashing
+- [Chapter 12: Time-Series Database](12-case-timeseries.qmd) — LSM-tree + Time Partitioning + Compression
+- [Chapter 13: Distributed Message Queue](13-case-distributed-queue.qmd) — Log + Replication + Consumer Groups
+
+Part V explores temporal primitives—the "how things happen over time" dimension:
+
+| Temporal Primitive | Chapter |
+|-------------------|---------|
+| Events, Event Logs, Event Sourcing | [Chapter 16: Events](16-events.qmd) |
+| State Machines, Statecharts, Workflows | [Chapter 17: State Machines](17-state-machines.qmd) |
+| Ordering, Causality, Clocks | [Chapter 18: Ordering](18-ordering.qmd) |
+
 # What's Next
 
 Now that we have a vocabulary of primitives, we can talk more precisely about **trade-off dimensions**—the axes along which every design choice moves you. That's the subject of the next article.
