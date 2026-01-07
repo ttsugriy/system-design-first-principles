@@ -742,4 +742,4 @@ Building resilient systems means thinking about failure from the start—not as 
 
 ---
 
-*Next: [Observability — Understanding What Your System Is Doing](20-observability.qmd)*
+*Next: [Observability — Understanding What Your System Is Doing](18-observability.qmd)*

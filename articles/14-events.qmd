@@ -743,4 +743,4 @@ In the next chapter, we'll explore **state machines**—the natural complement t
 
 ---
 
-*Next: [State Machines for System Design](17-state-machines.qmd)*
+*Next: [State Machines for System Design](15-state-machines.qmd)*

@@ -350,13 +350,13 @@ Part III shows how these primitives compose into real systems:
 - [Chapter 12: Time-Series Database](12-case-timeseries.qmd) — LSM-tree + Time Partitioning + Compression
 - [Chapter 13: Distributed Message Queue](13-case-distributed-queue.qmd) — Log + Replication + Consumer Groups
 
-Part V explores temporal primitives—the "how things happen over time" dimension:
+Part IV explores temporal primitives—the "how things happen over time" dimension:
 
 | Temporal Primitive | Chapter |
 |-------------------|---------|
-| Events, Event Logs, Event Sourcing | [Chapter 16: Events](16-events.qmd) |
-| State Machines, Statecharts, Workflows | [Chapter 17: State Machines](17-state-machines.qmd) |
-| Ordering, Causality, Clocks | [Chapter 18: Ordering](18-ordering.qmd) |
+| Events, Event Logs, Event Sourcing | [Chapter 14: Events](14-events.qmd) |
+| State Machines, Statecharts, Workflows | [Chapter 15: State Machines](15-state-machines.qmd) |
+| Ordering, Causality, Clocks | [Chapter 16: Ordering](16-ordering.qmd) |
 
 # What's Next
 

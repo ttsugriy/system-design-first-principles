@@ -758,6 +758,6 @@ In the next chapter, we'll look at the ultimate extension of this idea: systems 
 
 ---
 
-*Part IV: The AI Era — Chapter 1*
+*Part VI: The AI Era — Chapter 1*
 
 *Next: Self-Designing Systems*

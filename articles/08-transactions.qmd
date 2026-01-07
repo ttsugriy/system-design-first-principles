@@ -603,7 +603,7 @@ The classic protocol for atomic commits across multiple nodes.
 
 ### 2PC as State Machines
 
-Both coordinator and participants follow strict state machines (see [Chapter 17](17-state-machines.qmd) for more on state machines):
+Both coordinator and participants follow strict state machines (see [Chapter 15](15-state-machines.qmd) for more on state machines):
 
 ```
 Coordinator State Machine:

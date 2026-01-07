@@ -860,4 +860,4 @@ Combined with events (previous chapter), state machines give you a complete pict
 
 ---
 
-*Next: [Ordering and Causality — Time in Distributed Systems](18-ordering.qmd)*
+*Next: [Ordering and Causality — Time in Distributed Systems](16-ordering.qmd)*

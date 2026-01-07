@@ -790,6 +790,6 @@ This temporal perspective is orthogonal to the spatial perspective (services, da
 
 ---
 
-*Part V: Temporal Patterns — Complete*
+*Part IV: Temporal Patterns — Complete*
 
-*Continue to [Part VI: Operational Patterns](19-resilience.qmd) — resilience, observability, and running systems in production*
+*Continue to [Part V: Operational Patterns](17-resilience.qmd) — resilience, observability, and networking*

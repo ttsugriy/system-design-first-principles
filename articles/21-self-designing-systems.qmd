@@ -751,6 +751,6 @@ The periodic table of data structures is expanding. The design space is being ma
 
 ---
 
-*Part IV: The AI Era — Complete*
+*Part VI: The AI Era — Complete*
 
-*Continue to [Part V: Temporal Patterns](16-events.qmd) — exploring events, state machines, and ordering*
+*Return to [Part I: Foundations](01-design-space.qmd) or explore [Case Studies](11-case-kv-store.qmd)*

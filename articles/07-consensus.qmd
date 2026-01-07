@@ -13,7 +13,7 @@ Distributed systems face a fundamental problem: how do multiple nodes agree on s
 **Consensus** is the answer—a family of protocols that allow a group of nodes to agree on a single value (or sequence of values) despite failures. Consensus powers:
 
 - **Leader election**: Who's in charge?
-- **State machine replication**: Execute operations in the same order everywhere (see [Chapter 17: State Machines](17-state-machines.qmd) for the state machine perspective)
+- **State machine replication**: Execute operations in the same order everywhere (see [Chapter 15: State Machines](15-state-machines.qmd) for the state machine perspective)
 - **Configuration management**: Agree on cluster membership
 - **Distributed locking**: Coordinate access to shared resources
 
@@ -207,7 +207,7 @@ Each **transition** has a well-defined **trigger** and **action**:
 | Candidate → Follower | Discovered higher term | Recognize new term |
 | Leader → Follower | Discovered higher term | Step down immediately |
 
-This state machine formalization makes Raft easier to reason about and verify. For a deep dive on state machines in system design, see [Chapter 17: State Machines](17-state-machines.qmd).
+This state machine formalization makes Raft easier to reason about and verify. For a deep dive on state machines in system design, see [Chapter 15: State Machines](15-state-machines.qmd).
 
 **Election process**:
 

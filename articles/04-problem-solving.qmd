@@ -469,7 +469,7 @@ With these foundations, you can approach any system design problem systematicall
 - Make trade-offs explicit
 - Verify against requirements
 
-In Part II, we'll dive deeper into specific primitives. In Part III, we'll compose them into complete case studies. And in Part IV, we'll explore how AI can help navigate the design space.
+In Part II, we'll dive deeper into specific primitives. In Part III, we'll compose them into complete case studies. In Part IV, we'll explore temporal patterns—events, state machines, and ordering. In Part V, we'll cover operational concerns—resilience, observability, and networking. And in Part VI, we'll explore how AI can help navigate the design space.
 
 But the foundations are now in place. The rest is application.
 

@@ -533,4 +533,6 @@ Physical distance imposes hard latency floors:
 
 ---
 
-*Next: Part II Deep-Dives or return to [Primitives](02-primitives.qmd)*
+*Part V: Operational Patterns — Complete*
+
+*Continue to [Part VI: The AI Era](20-ai-design-exploration.qmd) — AI as a design space explorer*

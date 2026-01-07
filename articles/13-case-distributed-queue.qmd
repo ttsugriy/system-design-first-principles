@@ -645,4 +645,4 @@ Understanding these trade-offs lets you choose the right system—and configure 
 
 *Part III: Composition — Complete*
 
-*Next: Part IV — The AI Era*
+*Continue to [Part IV: Temporal Patterns](14-events.qmd) — events, state machines, and ordering*

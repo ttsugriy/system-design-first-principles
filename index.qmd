@@ -13,9 +13,9 @@ A journey from foundations to practice, organized around a core insight: *there 
 - **Part I: Foundations** — The design space, primitives, trade-offs, and a problem-solving framework
 - **Part II: Primitives Deep-Dives** — The building blocks of all systems
 - **Part III: Composition** — How primitives combine to form real systems
-- **Part IV: The AI Era** — AI as a design space explorer
-- **Part V: Temporal Patterns** — Events, state machines, and ordering
-- **Part VI: Operational Patterns** — Resilience and observability
+- **Part IV: Temporal Patterns** — Events, state machines, and ordering
+- **Part V: Operational Patterns** — Resilience, observability, and networking
+- **Part VI: The AI Era** — AI as a design space explorer
 
 ## Who This Is For
 

@@ -30,20 +30,20 @@ book:
         - articles/11-case-kv-store.qmd
         - articles/12-case-timeseries.qmd
         - articles/13-case-distributed-queue.qmd
-    - part: "Part IV: The AI Era"
+    - part: "Part IV: Temporal Patterns"
       chapters:
-        - articles/14-ai-design-exploration.qmd
-        - articles/15-self-designing-systems.qmd
-    - part: "Part V: Temporal Patterns"
+        - articles/14-events.qmd
+        - articles/15-state-machines.qmd
+        - articles/16-ordering.qmd
+    - part: "Part V: Operational Patterns"
       chapters:
-        - articles/16-events.qmd
-        - articles/17-state-machines.qmd
-        - articles/18-ordering.qmd
-    - part: "Part VI: Operational Patterns"
+        - articles/17-resilience.qmd
+        - articles/18-observability.qmd
+        - articles/19-networking.qmd
+    - part: "Part VI: The AI Era"
       chapters:
-        - articles/19-resilience.qmd
-        - articles/20-observability.qmd
-        - articles/21-networking.qmd
+        - articles/20-ai-design-exploration.qmd
+        - articles/21-self-designing-systems.qmd
 
 format:
   html:
