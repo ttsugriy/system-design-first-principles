@@ -55,7 +55,7 @@ Start simple. A single server. Get the primitives right.
 
 ## Storage Engine Choice
 
-Three options:
+Three options (see [Chapter 5: LSM-Trees](05-lsm-trees.qmd) and [Chapter 6: B-Trees](06-b-trees.qmd) for deep dives):
 
 | Option | Reads | Writes | Use Case |
 |--------|-------|--------|----------|
@@ -161,7 +161,7 @@ This single-node design handles our requirements—but has a single point of fai
 
 # Stage 2: Add Replication
 
-Single node works, but a disk failure loses everything. Add replication.
+Single node works, but a disk failure loses everything. Add replication (see [Chapter 7: Consensus](07-consensus.qmd) for Raft and leader election details).
 
 ## Replication Options
 
@@ -377,7 +377,7 @@ PUT("session:abc", data, ttl=3600)  # Expires in 1 hour
 
 ## Hot Key Handling
 
-Some keys get disproportionate traffic ("celebrity problem").
+Some keys get disproportionate traffic ("celebrity problem"). See [Chapter 9: Caching](09-caching.qmd) for caching strategies and eviction policies.
 
 **Solution: Key-level caching**
 ```
@@ -540,6 +540,10 @@ Each layer builds on the previous. Each adds capabilities—and complexity.
 
 The "simple" key-value store isn't simple. It's a composition of storage engines, consensus protocols, distributed coordination, and caching strategies. Understanding these components lets you reason about real systems: why DynamoDB behaves the way it does, why Redis is fast but memory-limited, why etcd prioritizes consistency over latency.
 
+## What's Next
+
+In the next case study, we'll apply similar principles to a different domain: time-series data. You'll see how the same primitives (LSM-trees, replication, partitioning) combine differently when optimizing for temporal access patterns.
+
 # Exercises
 
 ## Design Exercises
@@ -610,4 +614,4 @@ The "simple" key-value store isn't simple. It's a composition of storage engines
 
 ---
 
-*Next: Case Study — Time-Series Database*
+*Next: [Case Study — Time-Series Database](12-case-timeseries.qmd)*

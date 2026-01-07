@@ -469,6 +469,60 @@ With these foundations, you can approach any system design problem systematicall
 - Make trade-offs explicit
 - Verify against requirements
 
+# Exercises
+
+## Conceptual Questions
+
+1. **Framework Application**: For the problem "Design a URL shortener," apply Polya's four steps. What clarifying questions would you ask in "Understand the problem"? What primitives would you consider in "Devise a plan"?
+
+2. **Requirements Classification**: Classify each requirement as functional or non-functional:
+   - Users can create short URLs
+   - The system handles 100M URLs
+   - Short URLs expire after 30 days
+   - P99 latency under 50ms
+   - Analytics on click counts
+
+3. **Constraint Identification**: You're told "design a chat system for 10M concurrent users." What implicit constraints does this number imply for:
+   - Message storage?
+   - Connection management?
+   - Message delivery latency?
+
+## Design Exercises
+
+4. **Full Framework Practice**: Apply the complete Polya framework to: "Design a notification system that can send 1M push notifications per minute."
+   - Document your clarifying questions
+   - List the primitives you'd consider
+   - Sketch your solution
+   - Identify how you'd verify it meets requirements
+
+5. **Trade-off Documentation**: For a simple key-value store, document explicit trade-offs between:
+   - In-memory only vs. persistent storage
+   - Single node vs. distributed
+   - Strong consistency vs. eventual consistency
+
+   For each pair, state what you gain and what you pay.
+
+6. **Iterative Refinement**: Start with the simplest possible design for "a system that counts page views." Then apply three iterations of refinement:
+   - Iteration 1: Handle 1K requests/second
+   - Iteration 2: Handle 100K requests/second
+   - Iteration 3: Provide real-time analytics
+
+   What changes at each iteration?
+
+## Analysis Exercises
+
+7. **Back-of-Envelope Practice**: A video streaming service has 100M daily active users who watch an average of 2 hours of video per day. Estimate:
+   - Total bandwidth required (assume 5 Mbps per stream)
+   - Storage growth per day (assume videos average 1GB per hour of content)
+   - Number of CDN edge locations needed to keep latency under 50ms
+
+8. **Verification Checklist**: Create a verification checklist for "Design a ride-sharing matching system" that covers:
+   - Functional requirements
+   - Latency requirements
+   - Throughput requirements
+   - Failure scenarios
+   - Data consistency requirements
+
 In Part II, we'll dive deeper into specific primitives. In Part III, we'll compose them into complete case studies. In Part IV, we'll explore temporal patterns—events, state machines, and ordering. In Part V, we'll cover operational concerns—resilience, observability, and networking. And in Part VI, we'll explore how AI can help navigate the design space.
 
 But the foundations are now in place. The rest is application.
@@ -477,4 +531,4 @@ But the foundations are now in place. The rest is application.
 
 *Part I: Foundations — Complete*
 
-*Next: Part II: Primitives Deep-Dives*
+*Continue to [Part II: Primitives Deep-Dives](05-lsm-trees.qmd) — starting with LSM-trees*

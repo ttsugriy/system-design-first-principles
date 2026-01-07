@@ -219,7 +219,7 @@ Value sequence:
 
 ## Storage Engine: TSM (Time-Structured Merge)
 
-Similar to LSM-tree, but optimized for time-series:
+Similar to LSM-tree (see [Chapter 5: LSM-Trees](05-lsm-trees.qmd)), but optimized for time-series:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -526,6 +526,10 @@ Time-series databases achieve 10-100× better performance than general databases
 
 The trade-off: less flexibility than general databases. No complex joins, limited ad-hoc queries, schema constraints. But for metrics, monitoring, and IoT, specialized time-series databases are essential.
 
+## What's Next
+
+Our final case study tackles distributed message queues—a different architectural primitive altogether. While time-series databases optimize for temporal data storage and querying, message queues optimize for decoupling producers and consumers. Yet you'll see familiar patterns: append-only logs, partitioning for scale, and replication for durability.
+
 # Exercises
 
 ## Conceptual Questions
@@ -578,4 +582,4 @@ The trade-off: less flexibility than general databases. No complex joins, limite
 
 ---
 
-*Next: Case Study — Distributed Message Queue*
+*Next: [Case Study — Distributed Message Queue](13-case-distributed-queue.qmd)*

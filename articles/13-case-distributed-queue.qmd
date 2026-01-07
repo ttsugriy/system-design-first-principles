@@ -8,7 +8,7 @@ bibliography: ../references.bib
 
 # The Problem
 
-Build a distributed message queue. The backbone of asynchronous systems.
+Build a distributed message queue. The backbone of asynchronous systems. See also [Chapter 14: Events](14-events.qmd) for event-driven architectures and [Chapter 16: Ordering](16-ordering.qmd) for ordering guarantees.
 
 **Core abstraction**:
 ```
@@ -575,6 +575,10 @@ The key trade-offs:
 - **Exactly-once vs. simplicity**: Transactional semantics add complexity
 
 Understanding these trade-offs lets you choose the right system—and configure it correctly—for your workload.
+
+## What's Next
+
+With three case studies complete, you've seen how primitives compose into real systems. But we've been treating events as just "messages"—data flowing through queues. In Part IV, we'll explore events as first-class primitives: what they are, how to model with them, and how state machines and ordering constraints shape event-driven systems.
 
 # Exercises
 

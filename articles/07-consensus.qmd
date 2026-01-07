@@ -19,6 +19,18 @@ Distributed systems face a fundamental problem: how do multiple nodes agree on s
 
 Without consensus, distributed databases couldn't exist. Every system from PostgreSQL replication to Kubernetes etcd to Google Spanner depends on some form of consensus.
 
+## What You'll Learn
+
+This chapter covers:
+
+1. **Impossibility results**: Why consensus is fundamentally hard (FLP theorem)
+2. **Failure models**: Crash vs. Byzantine failures—and why most systems assume crashes only
+3. **Classic protocols**: Paxos (the foundation) and Raft (the practical alternative)
+4. **Implementation patterns**: Multi-Paxos, Multi-Raft, and real-world systems
+5. **Trade-offs**: When to use consensus and when to avoid it
+
+By the end, you'll understand why Raft has three node states, what "quorum" really means, and how systems like etcd and CockroachDB achieve coordination.
+
 # The Impossibility Result: FLP
 
 Before diving into solutions, we must understand a fundamental limit.
@@ -26,6 +38,12 @@ Before diving into solutions, we must understand a fundamental limit.
 The **Fischer-Lynch-Paterson (FLP) impossibility theorem** [@fischer1985flp] proves:
 
 > In an asynchronous distributed system, it is impossible to guarantee consensus in bounded time if even a single process can crash.
+
+**What does this mean in plain terms?** Imagine three servers trying to agree on a value. If they communicate only through messages (no shared clock), and one server might crash at any moment, there's no algorithm that can guarantee:
+
+1. All servers agree on the same value (safety)
+2. They eventually finish deciding (liveness)
+3. The algorithm terminates in bounded time
 
 This isn't a claim that consensus is hard—it's a mathematical proof that deterministic, always-terminating consensus is **impossible** in purely asynchronous networks.
 
@@ -593,4 +611,4 @@ Understanding consensus means understanding the fundamental limits of distribute
 
 ---
 
-*Next: Caching Strategies — The Performance Multiplier*
+*Next: [Transactions — Guarantees in a Hostile World](08-transactions.qmd)*

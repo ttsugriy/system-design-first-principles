@@ -358,6 +358,46 @@ Part IV explores temporal primitives—the "how things happen over time" dimensi
 | State Machines, Statecharts, Workflows | [Chapter 15: State Machines](15-state-machines.qmd) |
 | Ordering, Causality, Clocks | [Chapter 16: Ordering](16-ordering.qmd) |
 
+# Exercises
+
+## Conceptual Questions
+
+1. **Primitive Classification**: For each of the following components, identify which primitive category it belongs to (data structure, distribution, coordination, or temporal):
+   - Redis Sorted Set
+   - Kafka partition
+   - ZooKeeper lock
+   - gRPC streaming call
+   - PostgreSQL MVCC
+
+2. **Composition Identification**: A distributed cache like Memcached uses: (a) consistent hashing, (b) TCP connections, (c) hash tables. Draw a diagram showing how these primitives compose.
+
+3. **Missing Primitives**: Looking at the primitives table, what primitive might you need for a system that requires "exactly-once" message delivery? Is this a single primitive or a composition?
+
+## Design Exercises
+
+4. **Primitive Selection**: You're designing a rate limiter that must track request counts per user over sliding windows. Which primitives would you choose? Consider:
+   - The data structure for counting
+   - The distribution strategy if you need horizontal scaling
+   - The coordination mechanism if counts must be accurate across nodes
+
+5. **Trade-off Analysis**: Compare two approaches for a leaderboard system:
+   - **Option A**: Sorted set (like Redis ZSET)
+   - **Option B**: B-tree index on score column in PostgreSQL
+
+   For each, identify: read pattern (top-N queries), write pattern (score updates), memory overhead, and consistency guarantees.
+
+6. **Primitive Decomposition**: Take a system you use daily (e.g., Slack, Spotify, Uber) and decompose it into primitives. Identify at least 3 storage primitives, 2 distribution primitives, and 2 coordination primitives it likely uses.
+
+## Analysis Exercises
+
+7. **Primitive Costs**: For a write-heavy workload (90% writes, 10% reads):
+   - Rank LSM-tree, B-tree, and hash table by write efficiency
+   - Rank the same by read efficiency for point lookups
+   - Rank the same by range query efficiency
+   - Which would you choose and why?
+
+8. **Coordination Overhead**: A system uses 2PC (two-phase commit) for distributed transactions. If each phase requires 1 round-trip (2ms each way), what's the minimum transaction latency? How does this change with 3 participants vs 10 participants?
+
 # What's Next
 
 Now that we have a vocabulary of primitives, we can talk more precisely about **trade-off dimensions**—the axes along which every design choice moves you. That's the subject of the next article.

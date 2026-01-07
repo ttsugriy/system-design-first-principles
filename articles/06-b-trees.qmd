@@ -454,4 +454,4 @@ Modern innovations (LSM-trees, learned indexes) challenge B-trees in specific ni
 
 ---
 
-*Next: Consensus Protocols — Coordination in Distributed Systems*
+*Next: [Consensus Protocols — Coordination in Distributed Systems](07-consensus.qmd)*

@@ -568,4 +568,4 @@ In the following chapters, we'll apply these principles to concrete case studies
 
 ---
 
-*Next: Case Study — Building a Key-Value Store*
+*Next: [Case Study — Building a Key-Value Store](11-case-kv-store.qmd)*

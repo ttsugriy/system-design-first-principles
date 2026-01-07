@@ -471,4 +471,4 @@ In the next article, we'll contrast this with B-trees—the read-optimized alter
 
 ---
 
-*Next: B-Trees — The Read-Optimized Classic*
+*Next: [B-Trees — The Read-Optimized Classic](06-b-trees.qmd)*
