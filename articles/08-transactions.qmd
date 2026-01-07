@@ -777,6 +777,34 @@ For long-running transactions or microservices, the Saga pattern provides eventu
 2. **Idempotency**: Actions may be retried; must handle duplicates
 3. **Eventual consistency**: System may be temporarily inconsistent
 
+### Choreography vs. Orchestration
+
+Two patterns for coordinating Sagas:
+
+| Pattern | How It Works | Pros | Cons |
+|---------|--------------|------|------|
+| **Choreography** | Services react to events, no central controller | Loose coupling, simple services | Hard to track, complex flows |
+| **Orchestration** | Central coordinator directs each step | Clear flow, easy monitoring | Coordinator is bottleneck/SPOF |
+
+```
+Choreography:
+  OrderService ──[OrderCreated]──► InventoryService
+                                       │
+  PaymentService ◄──[InventoryReserved]─┘
+       │
+       └──[PaymentCharged]──► ShippingService
+
+Orchestration:
+  ┌─────────────────┐
+  │ Saga Coordinator│
+  └────────┬────────┘
+           ├──► InventoryService.reserve()
+           ├──► PaymentService.charge()
+           └──► ShippingService.schedule()
+```
+
+**Recommendation**: Start with orchestration for visibility; move to choreography for simpler, high-volume flows.
+
 **When to use Sagas**:
 
 | Use Case | Saga Appropriate? |

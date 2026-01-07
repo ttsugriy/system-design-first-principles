@@ -189,7 +189,7 @@ With consistent intervals, subsequent timestamps compress to **1 bit each**.
 
 ### XOR Value Compression (Gorilla)
 
-Slowly changing float values compress via XOR:
+Facebook's Gorilla database [@pelkonen2015gorilla] pioneered a technique where slowly changing float values compress via XOR:
 
 ```
 Value sequence:

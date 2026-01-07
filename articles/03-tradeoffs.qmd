@@ -108,17 +108,17 @@ B-trees have modest space amplification from internal nodes and page fragmentati
 
 # The CAP Theorem and PACELC
 
-In distributed systems, the CAP theorem defines a fundamental trade-off:
+In distributed systems, the CAP theorem [@gilbert2002brewer] defines a fundamental trade-off:
 
 > A distributed system can provide at most two of: **C**onsistency, **A**vailability, **P**artition tolerance.
 
 Since network partitions are inevitable, the practical choice is between consistency and availability during partitions.
 
-But CAP only describes behavior during failures. What about normal operation?
+But CAP only describes behavior during failures. What about normal operation? As Brewer later reflected [@brewer2012cap], CAP is more nuanced than the original formulation suggests.
 
 ## PACELC: The Full Picture
 
-Daniel Abadi proposed PACELC to extend CAP:
+Daniel Abadi proposed PACELC [@abadi2012pacelc] to extend CAP:
 
 > If there is a **P**artition, choose between **A**vailability and **C**onsistency.
 > **E**lse (normal operation), choose between **L**atency and **C**onsistency.

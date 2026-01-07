@@ -457,6 +457,8 @@ After:  [k2:v4] [k1:v5]   ← Only latest values
 
 ## Kafka
 
+Apache Kafka [@kreps2011kafka] pioneered the log-based message queue architecture that inspired much of our design.
+
 | Aspect | Details |
 |--------|---------|
 | **Model** | Log-based, partitioned |

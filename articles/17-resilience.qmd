@@ -463,6 +463,73 @@ Client can:
   3. Use Retry-After for backoff
 ```
 
+# Backpressure
+
+When a downstream service is slower than upstream producers, work accumulates. **Backpressure** propagates this signal upstream so producers slow down before queues overflow.
+
+## The Backpressure Problem
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     Without Backpressure                                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Producer (1000/s) ──► Queue ──► Consumer (500/s)                        │
+│                          │                                               │
+│                   Queue grows unbounded                                  │
+│                          │                                               │
+│                          ▼                                               │
+│              Memory exhaustion → System crash                            │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Backpressure Strategies
+
+| Strategy | How It Works | Trade-off |
+|----------|--------------|-----------|
+| **Blocking** | Producer blocks when queue full | Simple, but can cascade |
+| **Dropping** | Drop oldest/newest when full | Data loss, but bounded memory |
+| **Sampling** | Keep only fraction of items | Lossy, good for metrics |
+| **Buffering** | Spill to disk when memory full | Higher latency, no data loss |
+| **Feedback** | Tell producer to slow down | Requires protocol support |
+
+## Implementation Patterns
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      Backpressure Patterns                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  1. Bounded Queues (blocking):                                           │
+│     queue = BoundedQueue(max_size=1000)                                  │
+│     queue.put(item, block=True)  # Blocks if full                        │
+│                                                                          │
+│  2. Reactive Streams (pull-based):                                       │
+│     Consumer requests N items → Producer sends at most N                 │
+│     Consumer controls flow rate                                          │
+│                                                                          │
+│  3. Credit-based flow control:                                           │
+│     Consumer sends "credits" (capacity)                                  │
+│     Producer only sends if credits available                             │
+│                                                                          │
+│  4. Adaptive rate limiting:                                              │
+│     Monitor queue depth → adjust rate limits dynamically                 │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Backpressure in Real Systems
+
+| System | Mechanism |
+|--------|-----------|
+| Kafka | Consumer pulls; lag visible as metric |
+| gRPC | Flow control via HTTP/2 frames |
+| Reactive Streams | Publisher/Subscriber with request(n) |
+| TCP | Sliding window for flow control |
+
+**Key insight**: If you can't apply backpressure, you must either drop, sample, or eventually crash. Choose deliberately.
+
 # Health Checks
 
 Detect failures proactively rather than waiting for user requests to fail.

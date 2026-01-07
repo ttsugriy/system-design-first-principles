@@ -63,7 +63,7 @@ Three options (see [Chapter 5: LSM-Trees](05-lsm-trees.qmd) and [Chapter 6: B-Tr
 | B-tree | O(log n) | O(log n) | Read-heavy, range queries |
 | LSM-tree | O(log n) | O(1) amortized | Write-heavy |
 
-For a general-purpose key-value store with balanced read/write workload, an **LSM-tree** provides the best trade-off. It's what DynamoDB, Cassandra, and RocksDB use.
+For a general-purpose key-value store with balanced read/write workload, an **LSM-tree** provides the best trade-off. It's what DynamoDB, Cassandra, and RocksDB use. Amazon's original Dynamo paper [@decandia2007dynamo] pioneered many of the patterns we'll explore here.
 
 ## Architecture
 

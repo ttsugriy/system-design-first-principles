@@ -191,7 +191,7 @@ Kafka is the most widely-used event log in production:
 
 # Event Sourcing: Events as Source of Truth
 
-Traditional systems store current state:
+Event sourcing [@fowler2005eventsourcing] inverts the traditional model. Instead of storing current state, we store events.
 
 ```sql
 UPDATE accounts SET balance = 145 WHERE id = 123;
@@ -353,7 +353,7 @@ Events are optimized for writes (append-only). Queries need different structures
 
 # CQRS: Separating Reads and Writes
 
-**Command Query Responsibility Segregation** formalizes the separation:
+**Command Query Responsibility Segregation** [@young2010cqrs] formalizes the separation:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
