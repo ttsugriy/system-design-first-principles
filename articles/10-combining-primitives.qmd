@@ -527,6 +527,43 @@ The art is understanding how primitives interact:
 - Latency accumulates through the stack
 - Consistency requirements propagate upward
 
+# Exercises
+
+## Conceptual Questions
+
+1. **Primitive Identification**: For each system, list the key primitives and explain why they're used:
+   - Redis (in-memory key-value store)
+   - Apache Kafka (distributed log)
+   - PostgreSQL (relational database)
+
+2. **Layer Dependencies**: Explain why a storage engine typically needs both an index structure AND a WAL. What happens if you remove either component?
+
+3. **Composition Trade-offs**: You're adding replication to a single-node database. How does replication interact with:
+   - Write latency
+   - Read consistency
+   - Failure recovery
+
+## Design Exercises
+
+4. **Minimal Database**: Design the simplest possible database that supports:
+   - Key-value get/put operations
+   - Durability (survives crashes)
+   - Concurrent readers
+
+   What primitives are absolutely necessary? What can you omit?
+
+5. **Adding Features**: Starting from your minimal database in exercise 4, add support for:
+   - Range queries (get all keys between A and B)
+   - Transactions (atomic multi-key updates)
+
+   For each feature, identify which new primitives are needed and how they integrate with existing ones.
+
+6. **Distributed Extension**: Extend your database to run on 3 nodes with:
+   - Automatic failover if one node dies
+   - Consistent reads
+
+   Which primitives must be added? Draw the architecture showing how primitives connect.
+
 In the following chapters, we'll apply these principles to concrete case studies: building a key-value store, a time-series database, and a distributed queue from first principles.
 
 ---

@@ -324,6 +324,65 @@ When evaluating options, create a trade-off matrix:
 
 Now the conversation isn't "which is best?" but "which trade-offs fit our needs?"
 
+# Exercises
+
+## Conceptual Questions
+
+1. **RUM Conjecture Application**: A system needs to support:
+   - Point lookups: 100,000/second
+   - Range scans: 1,000/second (scanning 1000 keys each)
+   - Writes: 10,000/second
+
+   Which of R, U, or M would you optimize? What data structure would you choose and why?
+
+2. **CAP Analysis**: For each system, identify whether it prioritizes CP or AP, and explain the implications:
+   - A banking transaction system
+   - A social media "like" counter
+   - A distributed configuration store (like etcd)
+   - A shopping cart service
+
+3. **Write Amplification**: Explain why LSM-trees have higher write amplification than B-trees for update-heavy workloads. When does this trade-off favor LSM-trees anyway?
+
+## Quantitative Exercises
+
+4. **Latency vs. Throughput**: A service has:
+   - Average processing time: 10ms
+   - 100 worker threads
+
+   Using Little's Law, calculate:
+   - Maximum throughput
+   - What happens if average latency increases to 50ms?
+   - How many threads needed to maintain 10,000 requests/second at 50ms latency?
+
+5. **Tail Latency**: A request requires calling 10 parallel services. Each service has:
+   - P50: 10ms
+   - P99: 100ms
+
+   What is the expected P99 for the combined request? (Hint: the slowest service determines overall latency)
+
+6. **Space-Time Trade-off**: You have 100GB of data with the following access pattern:
+   - 80% of queries hit 20% of keys
+   - 20% of queries hit the remaining 80% of keys
+
+   Design a two-tier caching strategy. Calculate the memory required to achieve 90% cache hit rate.
+
+## Design Exercises
+
+7. **Trade-off Decision Matrix**: You're designing a logging system. Create a decision matrix comparing LSM-tree vs. append-only log storage for:
+   - Write throughput
+   - Query latency
+   - Storage efficiency
+   - Operational complexity
+
+   Recommend a design based on a workload of 1M writes/second with rare queries.
+
+8. **PACELC Analysis**: A global e-commerce platform operates in 5 regions. Design the consistency model for:
+   - Product inventory (must be accurate)
+   - Product reviews (can be eventually consistent)
+   - Shopping cart (user-specific, session-based)
+
+   Explain the PACELC trade-offs for each.
+
 # What's Next
 
 We now have:

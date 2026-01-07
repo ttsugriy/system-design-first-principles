@@ -526,6 +526,56 @@ Time-series databases achieve 10-100× better performance than general databases
 
 The trade-off: less flexibility than general databases. No complex joins, limited ad-hoc queries, schema constraints. But for metrics, monitoring, and IoT, specialized time-series databases are essential.
 
+# Exercises
+
+## Conceptual Questions
+
+1. **Compression Analysis**: Gorilla compression achieves 12:1 compression for Facebook metrics. Explain why time-series data compresses so well compared to random data. What properties of the data does the algorithm exploit?
+
+2. **Partitioning Trade-offs**: You're designing time-series storage with 1-hour partitions vs 1-day partitions. Analyze the trade-offs for:
+   - A query that spans 30 minutes
+   - A query that spans 7 days
+   - Retention cleanup (deleting data older than 90 days)
+
+3. **Hot/Warm/Cold**: Explain the tiered storage pattern for time-series. Why is recent data kept on SSDs while old data goes to object storage? What queries become expensive for cold data?
+
+## Quantitative Exercises
+
+4. **Storage Sizing**: A monitoring system collects:
+   - 1,000 servers
+   - 100 metrics per server
+   - 1 data point per second per metric
+   - Each raw point is 16 bytes (8 byte timestamp + 8 byte value)
+
+   Calculate:
+   - Raw data per day
+   - Storage after 12:1 compression
+   - Storage for 1 year with rollups (keep 1-second for 1 day, 1-minute for 30 days, 1-hour thereafter)
+
+5. **Query Performance**: A time-series database has:
+   - 1 billion data points total
+   - Data partitioned by day (365 partitions)
+   - Each partition has a time index
+
+   Estimate query time for:
+   - Last 1 hour of data for one metric
+   - Last 7 days of data for one metric
+   - Aggregation across all metrics for last 1 day
+
+## Design Exercises
+
+6. **Alerting System**: Design a time-series storage system optimized for alerting that:
+   - Evaluates 10,000 alert rules per minute
+   - Each rule queries last 5 minutes of one metric
+   - Alert latency must be < 30 seconds
+
+   What partitioning, indexing, and caching strategies would you use?
+
+7. **IoT at Scale**: Design time-series storage for 1 million IoT devices, each reporting every second. Consider:
+   - Ingestion throughput
+   - Query patterns (per-device, aggregate, geographic)
+   - Cost optimization
+
 ---
 
 *Next: Case Study — Distributed Message Queue*

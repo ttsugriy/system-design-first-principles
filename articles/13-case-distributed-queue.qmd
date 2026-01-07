@@ -576,6 +576,71 @@ The key trade-offs:
 
 Understanding these trade-offs lets you choose the right system—and configure it correctly—for your workload.
 
+# Exercises
+
+## Conceptual Questions
+
+1. **Delivery Semantics**: For each use case, which delivery semantic (at-most-once, at-least-once, exactly-once) is appropriate?
+   - Logging application errors
+   - Processing payment transactions
+   - Sending promotional emails
+   - Updating a search index
+
+2. **Ordering Guarantees**: Explain the difference between:
+   - Total ordering (all consumers see same order)
+   - Partition ordering (order within partition only)
+   - Causal ordering (cause before effect)
+
+   Which does Kafka provide? When would you need total ordering?
+
+3. **Consumer Groups**: Three consumers in a group consume from a topic with 6 partitions. Describe what happens when:
+   - One consumer crashes
+   - A fourth consumer joins
+   - The topic is expanded to 9 partitions
+
+## Quantitative Exercises
+
+4. **Throughput Sizing**: A queue system needs to handle:
+   - 100,000 messages/second
+   - Average message size: 1KB
+   - Retention: 7 days
+   - Replication factor: 3
+
+   Calculate:
+   - Required disk throughput for writes
+   - Total storage needed
+   - Network bandwidth between replicas
+
+5. **Latency Analysis**: A Kafka cluster has:
+   - 3 brokers in same datacenter
+   - Network RTT: 0.5ms
+   - Disk fsync: 2ms
+   - acks=all (wait for all replicas)
+
+   Calculate minimum end-to-end latency from producer send to consumer receive.
+
+## Design Exercises
+
+6. **Dead Letter Queue**: Design a dead letter queue system that:
+   - Captures messages that fail processing after 3 retries
+   - Allows manual inspection and replay
+   - Tracks failure reasons
+
+   What additional components are needed beyond the main queue?
+
+7. **Cross-Region Replication**: Design a message queue that spans 3 geographic regions for disaster recovery. Consider:
+   - Replication lag between regions
+   - Failover procedure
+   - Consumer behavior during region failure
+   - Conflict resolution if a region partitions and rejoins
+
+8. **Exactly-Once Processing**: Design an order processing system using a message queue where:
+   - Each order must be processed exactly once
+   - Processing involves updating a database
+   - Consumer failures should not cause duplicate orders
+
+   Specify the components and protocols needed.
+
 ---
 
 *Part III: Composition — Complete*
