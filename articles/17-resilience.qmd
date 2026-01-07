@@ -17,7 +17,7 @@ In distributed systems, failure is not an exception—it's the norm. Networks pa
 3. **Recover** from failures gracefully
 4. **Degrade** functionality rather than fail completely
 
-This chapter covers the primitives that make systems resilient. These patterns compose—a robust service typically combines several of them.
+This chapter covers the primitives that make systems resilient. These patterns compose—a robust service typically combines several of them. The systems from Part III ([Key-Value Store](11-case-kv-store.qmd), [Time-Series DB](12-case-timeseries.qmd), [Message Queue](13-case-distributed-queue.qmd)) all rely on these patterns in production.
 
 # The Failure Cascade Problem
 

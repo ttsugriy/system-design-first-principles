@@ -133,7 +133,7 @@ At scale (millions of requests/second), logging everything is expensive. Samplin
 
 # Metrics: The Numeric Heartbeat
 
-Metrics are numeric values measured over time.
+Metrics are numeric values measured over time. They're stored in time-series databases—see [Chapter 12: Time-Series Database](12-case-timeseries.qmd) for how these systems work internally.
 
 ## Metric Types
 

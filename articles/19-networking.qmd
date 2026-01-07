@@ -15,7 +15,7 @@ Every distributed system is fundamentally a network of communicating processes. 
 - Where bottlenecks occur
 - What consistency guarantees are achievable
 
-This chapter covers the networking primitives that appear throughout system design.
+This chapter covers the networking primitives that appear throughout system design. The [Key-Value Store](11-case-kv-store.qmd) and [Message Queue](13-case-distributed-queue.qmd) case studies from Part III both depend on these networking fundamentals for replication, partitioning, and client communication.
 
 # The Network Stack
 
